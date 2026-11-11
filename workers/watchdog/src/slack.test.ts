@@ -14,6 +14,13 @@ describe("slackText", () => {
     expect(slackText("<!channel> <@U123> a & b")).toBe("&lt;!channel&gt; &lt;@U123&gt; a &amp; b");
   });
 
+  it("unwraps a Discord no-preview link to the bare URL", () => {
+    expect(slackText("see <https://dash.cloudflare.com/abc/workers-and-pages>")).toBe(
+      "see https://dash.cloudflare.com/abc/workers-and-pages",
+    );
+    expect(slackText("<https://x.example/a|label> <!here>")).toBe("&lt;https://x.example/a|label&gt; &lt;!here&gt;");
+  });
+
   it("leaves plain text alone", () => {
     expect(slackText("cruzemaps.com answered 200 after 4 min")).toBe("cruzemaps.com answered 200 after 4 min");
   });

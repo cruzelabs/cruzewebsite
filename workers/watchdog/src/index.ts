@@ -1,7 +1,7 @@
 // Cloudflare Worker: account-wide watchdog for the Cruze Workers.
 //
 // Crons (see wrangler.jsonc):
-//   */5 * * * *  — posts to Discord when any Worker threw, hit the CPU limit,
+//   */5 * * * *  — posts to Slack and Discord when any Worker threw, hit the CPU limit,
 //                  or otherwise failed in the last check window. Also probes
 //                  api.cruzemaps.com (/health, /readyz) and posts when a
 //                  target goes down or recovers; state machine in apiProbe.ts,
@@ -37,11 +37,14 @@ import {
   type PageId,
   type StatusRecord,
 } from "./status";
+import { slackText } from "./slack";
 
 interface Env {
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
-  DISCORD_WEBHOOK_URL: string;
+  // Alerts go to every chat webhook that is set. At least one must be.
+  DISCORD_WEBHOOK_URL?: string;
+  SLACK_WEBHOOK_URL?: string;
   WATCHDOG_STATE: KVNamespace;
 }
 
@@ -98,8 +101,8 @@ export default {
   },
 
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    if (!env.DISCORD_WEBHOOK_URL) {
-      console.warn("watchdog idle: DISCORD_WEBHOOK_URL not set");
+    if (!env.DISCORD_WEBHOOK_URL && !env.SLACK_WEBHOOK_URL) {
+      console.warn("watchdog idle: neither SLACK_WEBHOOK_URL nor DISCORD_WEBHOOK_URL is set");
       return;
     }
     if (controller.cron === "0 14 * * *") {
@@ -145,7 +148,7 @@ async function probeTarget(env: Env, target: string, now: number): Promise<Targe
   );
   // KV writes are capped per day on the free plan; only persist a change.
   if (next !== prev) await env.WATCHDOG_STATE.put(key, JSON.stringify(next));
-  if (alert) await discord(env, message(alert, target, prev, next, now));
+  if (alert) await notify(env, message(alert, target, prev, next, now));
   return next;
 }
 
@@ -222,7 +225,7 @@ async function errorCheck(env: Env, now: number): Promise<void> {
         `- **${r.dimensions.scriptName}** ${label(r.dimensions.status)}: ` +
         `${r.sum.requests}x (median CPU ${ms(r.quantiles.cpuTimeP50)})`,
     );
-  await discord(
+  await notify(
     env,
     `:rotating_light: **Worker failures** ${clock(start)}-${clock(end)} UTC\n` +
       lines.join("\n") +
@@ -260,7 +263,7 @@ async function dailyDigest(env: Env, now: number): Promise<void> {
         `- **${name}**: ${s.total} requests, ${s.failed} failed` +
         (s.cpuLimit ? ` (${s.cpuLimit} CPU-limit)` : ""),
     );
-  await discord(
+  await notify(
     env,
     `${icon} **Workers daily digest** for ${new Date(start).toISOString().slice(0, 10)}\n` +
       `Requests: ${total.toLocaleString("en-US")} / ${FREE_DAILY_REQUESTS.toLocaleString("en-US")} free-plan cap (${pct.toFixed(1)}%)\n` +
@@ -293,21 +296,43 @@ async function invocations(env: Env, start: number, end: number): Promise<Row[]>
     // Surface watchdog breakage (expired token, schema change) instead of
     // going silent.
     const reason = body.errors?.map((e) => e.message).join("; ") || `HTTP ${res.status}`;
-    await discord(env, `:x: **Watchdog** could not read Workers analytics: ${reason}`);
+    await notify(env, `:x: **Watchdog** could not read Workers analytics: ${reason}`);
     return [];
   }
   return body.data.viewer.accounts[0]?.workersInvocationsAdaptive ?? [];
 }
 
-async function discord(env: Env, content: string): Promise<void> {
-  // Discord caps message content at 2000 characters. No message from here
-  // may ping anyone, whatever text it carries.
-  const res = await fetch(env.DISCORD_WEBHOOK_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ content: content.slice(0, 2000), allowed_mentions: { parse: [] } }),
-  });
-  if (!res.ok) console.error(`discord webhook failed: HTTP ${res.status}`);
+// Posts one alert to every configured chat webhook: Slack (#alerts) and,
+// until it is retired, Discord. No message from here may ping anyone,
+// whatever text it carries. A failing webhook never stops the other one.
+async function notify(env: Env, content: string): Promise<void> {
+  const posts: Promise<void>[] = [];
+  if (env.SLACK_WEBHOOK_URL) {
+    posts.push(post("slack", env.SLACK_WEBHOOK_URL, { text: slackText(content) }));
+  }
+  if (env.DISCORD_WEBHOOK_URL) {
+    // Discord caps message content at 2000 characters.
+    posts.push(
+      post("discord", env.DISCORD_WEBHOOK_URL, {
+        content: content.slice(0, 2000),
+        allowed_mentions: { parse: [] },
+      }),
+    );
+  }
+  await Promise.all(posts);
+}
+
+async function post(name: string, url: string, body: unknown): Promise<void> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) console.error(`${name} webhook failed: HTTP ${res.status}`);
+  } catch (err) {
+    console.error(`${name} webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function label(status: string): string {

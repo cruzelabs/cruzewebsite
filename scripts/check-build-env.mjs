@@ -20,9 +20,11 @@ import { fileURLToPath } from "node:url";
 export const REQUIRED = ["VITE_SUPABASE_URL", "VITE_SUPABASE_ANON_KEY", "VITE_POSTHOG_KEY"];
 export const PRODUCTION_BRANCH = "main";
 
-/** True when this is a Cloudflare build (strict mode: every branch counts). */
+/** True when this is a Cloudflare build of the production branch. */
 export function isProductionBuild(env) {
-  return Boolean(env.WORKERS_CI);
+  if (!env.WORKERS_CI) return false;
+  const branch = String(env.WORKERS_CI_BRANCH ?? "").trim();
+  return branch === "" || branch === PRODUCTION_BRANCH || branch.endsWith(`/${PRODUCTION_BRANCH}`);
 }
 
 /** Names of required variables that are unset or blank. */

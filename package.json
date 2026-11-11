@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "test:prerender": "node --test scripts/prerender.test.mjs",
     "test:bundle": "node --test scripts/check-prod-bundle.test.mjs",
+    "test:build-env": "node --test scripts/check-build-env.test.mjs",
     "preview": "vite preview",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d dist"

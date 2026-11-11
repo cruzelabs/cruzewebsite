@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Read first: the cross-repo agent rules in `arch/information-technology/agent-operations.md` of anudeep-bonagiri/cruze-arch (local clone `~/dev/cruze-arch`; arch.cruzemaps.com needs a Vercel login, so read the repo). Architecture and commands are in CLAUDE.md.
+Read first: the cross-repo agent rules in `arch/information-technology/agent-operations.md` of cruzelabs/cruze-arch (local clone `~/dev/cruze-arch`; arch.cruzemaps.com is behind Cloudflare Access, so read the repo). Tasks live in Linear, project Pilot Launch. Architecture and commands are in CLAUDE.md.
 
 - This repo is public, so GitHub Actions runs free: ci, Test, Secret Scan (gitleaks) and Lighthouse CI run on every PR and gate the merge. Never disable "Deploy to GitHub Pages". `scripts/ci-local.sh --comment <N>` runs the same jobs on this Mac when you want a local record.
 - Before a PR: `npm run lint`, `npm test`, `npm run build` (Vite build, prerender, then the production-bundle check).

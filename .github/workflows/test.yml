@@ -54,6 +54,7 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ci-placeholder
         run: |
           node --test scripts/check-prod-bundle.test.mjs
+          node --test scripts/check-build-env.test.mjs
           npm run build
 
   db:

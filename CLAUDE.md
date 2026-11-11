@@ -9,7 +9,7 @@ Agent rules and this repo's gates: @AGENTS.md
 Package manager: **npm is the source of truth.** `package-lock.json` is committed; `bun.lock` is gitignored (it drifted whenever someone ran `npm install`, and Cloudflare Pages' `bun install --frozen-lockfile` caught the drift — a recurring failure mode). Use `npm` for installs that need to be reproducible. Bun is fine locally if you want install speed; just don't commit `bun.lock`. CF Pages build command should be `npm ci --legacy-peer-deps && npm run build`.
 
 - `npm run dev` — Vite dev server on `http://localhost:8080` (host `::`, see [vite.config.ts](vite.config.ts))
-- `npm run build` — production build to `dist/` **plus** `node scripts/prerender.mjs` (per-route HTML emitter + sitemap.xml + robots.txt) and `node scripts/check-prod-bundle.mjs` (fails if dev-only demo/impersonation/diag code shipped)
+- `npm run build` — production build to `dist/` **plus** `node scripts/prerender.mjs` (per-route HTML emitter + sitemap.xml + robots.txt) and `node scripts/check-prod-bundle.mjs` (fails if dev-only demo/impersonation/diag code shipped) It starts with `node scripts/check-build-env.mjs`, which fails a Cloudflare build of `main` when `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` or `VITE_POSTHOG_KEY` is missing, so a site that cannot reach its backend is never published; local, GitHub Actions and preview builds skip it.
 - `npm run build:dev` — build with `mode=development` (used for diagnosing prod-only issues)
 - `npm run preview` — serve the built `dist/` locally
 - `npm run lint` — flat-config ESLint (`eslint.config.js`); `@typescript-eslint/no-unused-vars` is disabled and `react-refresh/only-export-components` is a warning

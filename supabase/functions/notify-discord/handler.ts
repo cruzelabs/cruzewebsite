@@ -1,10 +1,14 @@
 // Request handling for the notify-discord edge function, kept free of network
 // and Supabase imports so it can be unit tested with `deno test` (see
-// handler.test.ts). index.ts wires in the real database and Discord calls.
+// handler.test.ts). index.ts wires in the real database and webhook calls.
+//
+// The notice goes to Discord, to Slack, or to both, depending on which webhook
+// secrets are set. The function keeps its name because the database triggers
+// call it by URL.
 //
 // The function is called by database webhook triggers with no auth header, so
 // anyone on the internet can POST to it. It therefore trusts only `type`,
-// `table` and `record.id` from the payload. Everything that reaches Discord is
+// `table` and `record.id` from the payload. Everything that is posted is
 // read back from the database by id with the service role, and:
 //   - only INSERTs on pilot_applications, loi_signatures and contact_messages
 //   - only rows created in the last 10 minutes (and not dated in the future)
@@ -14,6 +18,8 @@
 //     10-minute window instead of one embed per message
 //   - allowed_mentions is empty, so text like @everyone never pings, and user
 //     text is markdown-escaped so it cannot form masked links or headings
+//   - the Slack copy escapes &, < and >, so user text cannot form links or
+//     <!channel> mentions there either
 
 export const TABLES = ["pilot_applications", "loi_signatures", "contact_messages"] as const;
 export type Table = (typeof TABLES)[number];
@@ -32,6 +38,7 @@ export const FUTURE_SKEW_MS = 60 * 1000;
 export const CONTACT_FLOOD_WINDOW_MS = 10 * 60 * 1000;
 export const CONTACT_FLOOD_LIMIT = 10;
 export const CONTACT_PREVIEW_CHARS = 500;
+export const SLACK_MAX_CHARS = 3000;
 
 export const SITE_URL = "https://cruzemaps.com";
 export const ADMIN_MESSAGES_URL = `${SITE_URL}/admin?tab=messages`;
@@ -48,7 +55,7 @@ export type Row = Record<string, any>;
 
 export type ClaimResult = "claimed" | "duplicate" | "error";
 
-export interface DiscordResult {
+export interface PostResult {
   ok: boolean;
   status: number;
   text: string;
@@ -64,7 +71,8 @@ export interface Deps {
   claim(key: string): Promise<ClaimResult>;
   // Contact messages created at or after `sinceIso`, or null on a query error.
   countContactsSince(sinceIso: string): Promise<number | null>;
-  postDiscord(url: string, body: unknown): Promise<DiscordResult>;
+  // POST a JSON body to a Discord or Slack webhook URL.
+  postWebhook(url: string, body: unknown): Promise<PostResult>;
 }
 
 export async function handle(req: Request, deps: Deps): Promise<Response> {
@@ -91,9 +99,10 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     return json({ error: "record.id must be a uuid" }, 400);
   }
 
-  const webhookUrl = webhookFor(table as Table, deps.env);
-  if (!webhookUrl) {
-    // Opting out of Discord is not an error; return 200 so callers do not retry.
+  const discordUrl = webhookFor(table as Table, deps.env);
+  const slackUrl = deps.env("SLACK_WEBHOOK_URL") || undefined;
+  if (!discordUrl && !slackUrl) {
+    // Opting out of both is not an error; return 200 so callers do not retry.
     return json({ skipped: `no webhook URL configured for ${table}` });
   }
 
@@ -111,7 +120,7 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   if (claim === "duplicate") return json({ skipped: "already notified" });
   if (claim === "error") return json({ error: "could not record the notification" }, 500);
 
-  let body: unknown;
+  let body: Row;
   if (table === "contact_messages") {
     const since = new Date(now.getTime() - CONTACT_FLOOD_WINDOW_MS).toISOString();
     const recent = await deps.countContactsSince(since);
@@ -133,11 +142,19 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     body = loiEmbed(row);
   }
 
-  const res = await deps.postDiscord(webhookUrl, body);
-  if (!res.ok) {
-    console.error(`notify-discord: Discord ${res.status}: ${res.text}`);
-    return json({ error: `Discord ${res.status}` }, 500);
+  const sends: [string, string, Row][] = [];
+  if (discordUrl) sends.push(["Discord", discordUrl, body]);
+  if (slackUrl) sends.push(["Slack", slackUrl, slackMessage(body)]);
+
+  const failed: string[] = [];
+  for (const [name, url, payload] of sends) {
+    const res = await deps.postWebhook(url, payload);
+    if (!res.ok) {
+      console.error(`notify-discord: ${name} ${res.status}: ${res.text}`);
+      failed.push(`${name} ${res.status}`);
+    }
   }
+  if (failed.length) return json({ error: failed.join(", ") }, 500);
   return json({ ok: true, table });
 }
 
@@ -162,6 +179,29 @@ export function isFresh(createdAt: unknown, now: Date): boolean {
 export function plain(value: unknown): string {
   const s = value == null ? "" : String(value);
   return s.replace(/[\\`*_~|<>[\]()]/g, "\\$&").replace(/^(\s*)([#-])/gm, "$1\\$2");
+}
+
+// The same notice as a Slack incoming-webhook message. It is built from the
+// Discord body so the two cannot drift apart.
+export function slackMessage(discord: Row): Row {
+  const embed = discord.embeds[0];
+  const fields: Row[] = embed.fields ?? [];
+  const lines = [`*${slackText(embed.title)}*`, slackText(embed.description)];
+  for (const f of fields) lines.push(`*${f.name}:* ${slackText(f.value)}`);
+  if (embed.url && !fields.some((f) => f.value === embed.url)) lines.push(`<${embed.url}>`);
+  return { text: lines.join("\n").slice(0, SLACK_MAX_CHARS) };
+}
+
+// Discord-escaped text as Slack text: our own **bold** becomes *bold*, the
+// backslashes plain() added come off, then &, < and > are escaped the way
+// Slack asks.
+export function slackText(value: unknown): string {
+  return String(value ?? "")
+    .replace(/(?<!\\)\*\*(.+?)(?<!\\)\*\*/g, "*$1*")
+    .replace(/\\(.)/gs, "$1")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 // One embed field value: escaped, never empty, at most 1024 characters.

@@ -6,7 +6,7 @@
 // CI runs this in the "edge functions" job of .github/workflows/test.yml.
 
 import { assert, assertEquals } from "jsr:@std/assert@1.0.13";
-import { ADMIN_MESSAGES_URL, type Deps, handle, plain, type Row, type Table } from "./handler.ts";
+import { ADMIN_MESSAGES_URL, type Deps, handle, plain, type Row, slackText, type Table } from "./handler.ts";
 
 const NOW = new Date("2026-10-18T12:00:00Z");
 const ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -25,6 +25,7 @@ function fake(opts: {
   loadError?: string;
   claimError?: boolean;
   discordStatus?: number;
+  slackStatus?: number;
 } = {}): Fake {
   const env = opts.env ?? ENV;
   const d: Fake = {
@@ -48,9 +49,9 @@ function fake(opts: {
     countContactsSince() {
       return Promise.resolve(opts.recentContacts === undefined ? 1 : opts.recentContacts);
     },
-    postDiscord(url, body) {
+    postWebhook(url, body) {
       d.posts.push({ url, body: body as Row });
-      const status = opts.discordStatus ?? 204;
+      const status = (url.startsWith("https://slack.") ? opts.slackStatus : opts.discordStatus) ?? 204;
       return Promise.resolve({ ok: status < 300, status, text: status < 300 ? "" : "nope" });
     },
   };
@@ -267,4 +268,50 @@ Deno.test("plain() escapes markdown so user text cannot form links or headings",
   assertEquals(plain("# Big\n- item"), "\\# Big\n\\- item");
   assertEquals(plain("**bold** `code` <@123> ||spoiler||"), "\\*\\*bold\\*\\* \\`code\\` \\<@123\\> \\|\\|spoiler\\|\\|");
   assertEquals(plain("dana-lee@example.com"), "dana-lee@example.com");
+});
+
+const SLACK_ENV = { SLACK_WEBHOOK_URL: "https://slack.invalid/hook" };
+
+Deno.test("SLACK_WEBHOOK_URL alone posts the notice to Slack as escaped text", async () => {
+  const row = contactRow({ name: "<!channel> & co", message: "[Reset](https://evil.example) *hi*" });
+  const d = fake({ env: SLACK_ENV, rows: { contact_messages: row } });
+  const { status, body } = await call(d, { type: "INSERT", table: "contact_messages", record: { id: ID } });
+  assertEquals(status, 200);
+  assertEquals(body, { ok: true, table: "contact_messages" });
+  assertEquals(d.posts.map((p) => p.url), ["https://slack.invalid/hook"]);
+  assertEquals(Object.keys(d.posts[0].body), ["text"]);
+  const lines: string[] = d.posts[0].body.text.split("\n");
+  assertEquals(lines[0], "*New contact message*");
+  assert(lines.includes("*Name:* &lt;!channel&gt; &amp; co"));
+  assert(lines.includes("*Message:* [Reset](https://evil.example) *hi*"));
+  assert(lines.includes(`*Admin tab:* ${ADMIN_MESSAGES_URL}`));
+  assert(!d.posts[0].body.text.includes("<"));
+});
+
+Deno.test("with both webhooks set the notice goes to Discord and Slack", async () => {
+  const d = fake({ env: { ...ENV, ...SLACK_ENV }, rows: { loi_signatures: loiRow() } });
+  const { body } = await call(d, { type: "INSERT", table: "loi_signatures", record: { id: ID } });
+  assertEquals(body, { ok: true, table: "loi_signatures" });
+  assertEquals(d.posts.map((p) => p.url), ["https://discord.invalid/default", "https://slack.invalid/hook"]);
+  assertEquals(d.posts[0].body.embeds[0].title, "✍️ LOI signed");
+  const lines: string[] = d.posts[1].body.text.split("\n");
+  assertEquals(lines[0], "*✍️ LOI signed*");
+  assertEquals(lines[1], "*Dana Lee* just signed the Letter of Intent.");
+  assertEquals(lines.at(-1), `<https://cruzemaps.com/loi/${ID}>`);
+});
+
+Deno.test("a Slack failure is a 500 that names Slack, and Discord still gets the notice", async () => {
+  const d = fake({ env: { ...ENV, ...SLACK_ENV }, rows: { contact_messages: contactRow() }, slackStatus: 500 });
+  const { status, body } = await call(d, { type: "INSERT", table: "contact_messages", record: { id: ID } });
+  assertEquals(status, 500);
+  assertEquals(body, { error: "Slack 500" });
+  assertEquals(d.posts.length, 2);
+});
+
+Deno.test("slackText() undoes plain() and escapes only what Slack needs", () => {
+  for (const s of ["[click](https://x.example)", "# Big\n- item", "back\\slash \\# and `code`", "a_b ~c~ ||d||"]) {
+    assertEquals(slackText(plain(s)), s);
+  }
+  assertEquals(slackText(plain("A&B <@U123> <!here>")), "A&amp;B &lt;@U123&gt; &lt;!here&gt;");
+  assertEquals(slackText(`**${plain("Dana **Lee**")}** signed`), "*Dana **Lee*** signed");
 });

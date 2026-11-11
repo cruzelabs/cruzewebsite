@@ -7,9 +7,12 @@ const SLACK_MAX_CHARS = 3000;
 // Slack reads "&", "<" and ">" as control characters: "<!channel>" pings a
 // channel and "<@U123>" pings a person. Escaping them means no alert can ping
 // anyone, whatever text it carries. Bold is "**x**" in Discord and "*x*" in
-// Slack; emoji shortcodes such as ":x:" mean the same in both.
+// Slack; emoji shortcodes such as ":x:" mean the same in both. Discord's
+// "<https://...>" (a link without a preview) becomes the bare URL, which Slack
+// links on its own.
 export function slackText(content: string): string {
   return content
+    .replace(/<(https?:\/\/[^\s<>|]+)>/g, "$1")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

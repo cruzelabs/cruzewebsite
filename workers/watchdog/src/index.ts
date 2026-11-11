@@ -8,8 +8,9 @@
 //                  state kept in the WATCHDOG_STATE KV namespace. Then checks
 //                  the public pages and updates the status page's record
 //                  (status.ts), in the same namespace.
-//   0 14 * * *   — daily digest: yesterday's requests vs the free-plan cap,
-//                  failures per Worker. Doubles as a heartbeat: if the digest
+//   0 14 * * *   — daily digest: yesterday's requests vs a day's share of
+//                  the Workers Paid monthly allowance, failures per
+//                  Worker. Doubles as a heartbeat: if the digest
 //                  stops arriving, the watchdog itself is broken.
 //
 // One public route, status.cruzemaps.com: GET / (HTML) and /status.json, read
@@ -54,8 +55,12 @@ interface Row {
   dimensions: { scriptName: string; status: string };
 }
 
-// Workers free plan: 100k requests/day across the account.
-const FREE_DAILY_REQUESTS = 100_000;
+// Workers Paid (the account's plan since 2026-11-11) includes 10 million
+// requests a month across the account and has no daily cap. The digest
+// compares a day against an even daily share of that allowance, so a day that
+// would use up the month if repeated stands out.
+const PAID_MONTHLY_REQUESTS = 10_000_000;
+const DAILY_SHARE_REQUESTS = Math.floor(PAID_MONTHLY_REQUESTS / 31);
 
 // Analytics lag a couple of minutes, so each 5-min run checks the window that
 // closed 5 minutes ago. Windows tile exactly: every invocation is seen once.
@@ -252,7 +257,7 @@ async function dailyDigest(env: Env, now: number): Promise<void> {
   }
 
   const total = [...byScript.values()].reduce((n, s) => n + s.total, 0);
-  const pct = (total / FREE_DAILY_REQUESTS) * 100;
+  const pct = (total / DAILY_SHARE_REQUESTS) * 100;
   const anyFailures = [...byScript.values()].some((s) => s.failed > 0);
   const icon = pct >= 80 || anyFailures ? ":warning:" : ":white_check_mark:";
 
@@ -266,7 +271,7 @@ async function dailyDigest(env: Env, now: number): Promise<void> {
   await notify(
     env,
     `${icon} **Workers daily digest** for ${new Date(start).toISOString().slice(0, 10)}\n` +
-      `Requests: ${total.toLocaleString("en-US")} / ${FREE_DAILY_REQUESTS.toLocaleString("en-US")} free-plan cap (${pct.toFixed(1)}%)\n` +
+      `Requests: ${total.toLocaleString("en-US")} / ${DAILY_SHARE_REQUESTS.toLocaleString("en-US")} daily share of the 10M a month in Workers Paid (${pct.toFixed(1)}%)\n` +
       (lines.length ? lines.join("\n") : "- no invocations") +
       `\n${dashboardLink(env)}`,
   );

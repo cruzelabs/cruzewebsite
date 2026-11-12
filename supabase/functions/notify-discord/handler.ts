@@ -24,10 +24,15 @@
 export const TABLES = ["pilot_applications", "loi_signatures", "contact_messages"] as const;
 export type Table = (typeof TABLES)[number];
 
-// Columns read back for each table. Nothing else from the row is used.
+// Columns read back for each table. Nothing else from the row is used. The
+// pilot_applications list names columns from migration 026, so apply 026
+// before deploying this function.
 export const COLUMNS: Record<Table, string> = {
   pilot_applications:
-    "id, company_name, truck_size, fleet_size, notes, contact_name, contact_email, fms_provider, website, created_at",
+    "id, company_name, truck_size, fleet_size, truck_count, notes, contact_name, contact_email, " +
+    "fms_provider, fms_other, primary_lanes, data_authorizer_name, data_authorizer_email, " +
+    "safety_contact_name, safety_contact_email, tablet_model, tablet_count, tablet_management, " +
+    "website, created_at",
   loi_signatures:
     "id, participant_name, participant_company, participant_title, fleet_size, initials, signed_at, created_at",
   contact_messages: "id, name, email, organization, message, created_at",
@@ -182,14 +187,52 @@ export function plain(value: unknown): string {
 }
 
 // The same notice as a Slack incoming-webhook message. It is built from the
-// Discord body so the two cannot drift apart.
+// Discord body so the two cannot drift apart. Escaping for Slack can make a
+// value longer (& becomes &amp;), so when the whole text would pass
+// SLACK_MAX_CHARS the longest values are shortened, and every field and the
+// link still arrive. The final slice is only a backstop.
 export function slackMessage(discord: Row): Row {
   const embed = discord.embeds[0];
   const fields: Row[] = embed.fields ?? [];
-  const lines = [`*${slackText(embed.title)}*`, slackText(embed.description)];
-  for (const f of fields) lines.push(`*${f.name}:* ${slackText(f.value)}`);
-  if (embed.url && !fields.some((f) => f.value === embed.url)) lines.push(`<${embed.url}>`);
+  const head = [`*${slackText(embed.title)}*`, slackText(embed.description)];
+  const labels = fields.map((f) => `*${f.name}:* `);
+  const tail = embed.url && !fields.some((f) => f.value === embed.url) ? [`<${embed.url}>`] : [];
+  let values = fields.map((f) => slackText(f.value));
+  const fixed =
+    [...head, ...tail].join("").length + labels.join("").length + head.length + fields.length + tail.length - 1;
+  if (fixed + values.join("").length > SLACK_MAX_CHARS) values = shareBudget(values, SLACK_MAX_CHARS - fixed);
+  const lines = [...head, ...fields.map((_, i) => labels[i] + values[i]), ...tail];
   return { text: lines.join("\n").slice(0, SLACK_MAX_CHARS) };
+}
+
+// Shortens the longest values until all of them fit in `budget` characters:
+// short values stay whole, the long ones share what is left equally.
+export function shareBudget(values: string[], budget: number): string[] {
+  let open = values.map((_, i) => i);
+  let left = Math.max(budget, 0);
+  for (;;) {
+    const share = open.length ? Math.floor(left / open.length) : 0;
+    const fits = open.filter((i) => values[i].length <= share);
+    if (fits.length === 0) {
+      return values.map((v, i) => (open.includes(i) ? cutSlack(v, share) : v));
+    }
+    for (const i of fits) left -= values[i].length;
+    open = open.filter((i) => !fits.includes(i));
+  }
+}
+
+// Cuts Slack text to `max` characters with a trailing "…", never inside an
+// &amp; &lt; or &gt; entity. After slackText every & starts one of those.
+function cutSlack(text: string, max: number): string {
+  if (text.length <= max) return text;
+  if (max <= 1) return "…";
+  let cut = text.slice(0, max - 1);
+  const amp = cut.lastIndexOf("&");
+  if (amp !== -1) {
+    const entity = text.startsWith("&amp;", amp) ? 5 : 4;
+    if (amp + entity > cut.length) cut = cut.slice(0, amp);
+  }
+  return cut + "…";
 }
 
 // Discord-escaped text as Slack text: our own **bold** becomes *bold*, the
@@ -221,27 +264,83 @@ function message(embed: Row): Row {
   };
 }
 
+const TABLET_MANAGERS = new Map<string, string>([
+  ["fleet_mdm", "managed through the fleet's MDM"],
+  ["cruze", "managed by Cruze"],
+  ["manual", "managed by hand"],
+]);
+
+function nonBlank(value: unknown): string | null {
+  const s = value == null ? "" : String(value).trim();
+  return s || null;
+}
+
+// The exact count from the new form, else the size bucket of an older row.
+function trucksValue(row: Row): string {
+  if (typeof row.truck_count === "number") return fieldValue(row.truck_count.toLocaleString("en-US"));
+  return nonBlank(row.fleet_size) ? fieldValue(row.fleet_size, 50) : "(not given)";
+}
+
+function providerValue(row: Row): string {
+  const provider = nonBlank(row.fms_provider);
+  if (!provider) return "(not given)";
+  const other = nonBlank(row.fms_other);
+  return fieldValue(other ? `${provider} (${other})` : provider, 150);
+}
+
+function personValue(name: unknown, email: unknown): string | null {
+  const text = [nonBlank(name), nonBlank(email)].filter(Boolean).join(", ");
+  return text ? fieldValue(text, 280) : null;
+}
+
+function tabletsValue(row: Row): string | null {
+  const parts: string[] = [];
+  if (typeof row.tablet_count === "number") {
+    parts.push(`${row.tablet_count.toLocaleString("en-US")} ${row.tablet_count === 1 ? "tablet" : "tablets"}`);
+  }
+  const model = nonBlank(row.tablet_model);
+  if (model) parts.push(model);
+  const manager = TABLET_MANAGERS.get(String(row.tablet_management));
+  if (manager) parts.push(manager);
+  return parts.length ? fieldValue(parts.join(", "), 250) : null;
+}
+
+// Trucks, provider and sites always appear, so staff see at once what a pilot
+// still needs. Each value has its own cap. Together they keep the embed under
+// Discord's 6,000 character total and a post with every answer at the form's
+// longest under SLACK_MAX_CHARS, so the Slack copy loses no field.
 export function pilotEmbed(row: Row): Row {
-  const fields = [
-    { name: "Company", value: row.company_name ? fieldValue(row.company_name) : "(unspecified)", inline: true },
-    { name: "Fleet size", value: row.fleet_size ? fieldValue(row.fleet_size) : "(unspecified)", inline: true },
-    { name: "Truck class", value: row.truck_size ? fieldValue(row.truck_size) : "(unspecified)", inline: true },
+  const fields: Row[] = [
+    { name: "Company", value: row.company_name ? fieldValue(row.company_name, 150) : "(unspecified)", inline: true },
+    { name: "Trucks", value: trucksValue(row), inline: true },
+    { name: "ELD or telematics", value: providerValue(row), inline: true },
+    {
+      name: "Sites or lanes",
+      value: nonBlank(row.primary_lanes) ? fieldValue(row.primary_lanes, 400) : "(not given)",
+      inline: false,
+    },
   ];
 
+  if (row.truck_size) {
+    fields.push({ name: "Truck class", value: fieldValue(row.truck_size, 60), inline: true });
+  }
   if (row.contact_name) {
-    fields.push({ name: "Contact", value: fieldValue(row.contact_name), inline: true });
+    fields.push({ name: "Contact", value: fieldValue(row.contact_name, 120), inline: true });
   }
   if (row.contact_email) {
-    fields.push({ name: "Email", value: fieldValue(row.contact_email), inline: true });
+    fields.push({ name: "Email", value: fieldValue(row.contact_email, 160), inline: true });
   }
-  if (row.fms_provider) {
-    fields.push({ name: "FMS", value: fieldValue(row.fms_provider), inline: true });
-  }
+  const access = personValue(row.data_authorizer_name, row.data_authorizer_email);
+  if (access) fields.push({ name: "Authorizes data access", value: access, inline: false });
+  const safety = personValue(row.safety_contact_name, row.safety_contact_email);
+  if (safety) fields.push({ name: "Safety contact", value: safety, inline: false });
+  const tablets = tabletsValue(row);
+  if (tablets) fields.push({ name: "Tablets", value: tablets, inline: false });
   if (row.website) {
-    fields.push({ name: "Website", value: fieldValue(row.website), inline: false });
+    fields.push({ name: "Website", value: fieldValue(row.website, 200), inline: false });
   }
   if (row.notes) {
-    fields.push({ name: "Admin notes", value: fieldValue(row.notes), inline: false });
+    fields.push({ name: "Admin notes", value: fieldValue(row.notes, 300), inline: false });
   }
 
   return message({

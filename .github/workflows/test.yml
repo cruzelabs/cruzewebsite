@@ -163,6 +163,24 @@ jobs:
           -v mig=supabase/migrations/20261022_025_staff_messages_invite_ledger.sql
           -f supabase/tests/025_staff_messages_invite_ledger.test.sql
 
+      - name: application fields and the LOI's truck count (migration 026)
+        env:
+          PGPASSWORD: postgres
+        run: >
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -c "create database t026"
+          && psql -h localhost -U postgres -d t026 -v ON_ERROR_STOP=1
+          -v mig=supabase/migrations/20261112_026_application_fields.sql
+          -f supabase/tests/026_application_fields.test.sql
+
+      - name: one approval creates the fleet's organization (migration 027)
+        env:
+          PGPASSWORD: postgres
+        run: >
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -c "create database t027"
+          && psql -h localhost -U postgres -d t027 -v ON_ERROR_STOP=1
+          -v mig=supabase/migrations/20261112_027_approve_pilot_application.sql
+          -f supabase/tests/027_approve_pilot_application.test.sql
+
   edge-functions:
     # Deno unit tests for Supabase edge functions. No network calls to Discord,
     # Resend or Supabase: the handlers get fake dependencies.

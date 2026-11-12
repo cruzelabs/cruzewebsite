@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Loader2, Building, Truck, FileSignature, ExternalLink } from "lucide-react";
+import { Loader2, Building, Truck, FileSignature, ExternalLink, Copy, CheckCircle2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
@@ -17,51 +17,81 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { AlertTriangle } from "lucide-react";
+import { applicationAnswers, trucksText, type PilotApplicationRow } from "@/lib/pilotApplication";
+import { fleetCreateCommand } from "@/lib/fleetCreate";
 
 const LIFECYCLE = ["pending", "in_review", "approved", "onboarding", "active", "denied", "archived"] as const;
 type LifecycleState = (typeof LIFECYCLE)[number];
 
-type PilotApp = {
-  id: string;
-  user_id: string;
-  company_name: string | null;
-  truck_size: string | null;
-  fleet_size: string | null;
+// Stages that come after approval: the application has its organization.
+const APPROVED_STAGES: LifecycleState[] = ["approved", "onboarding", "active"];
+
+type PilotApp = Omit<PilotApplicationRow, "status" | "reviewed_at"> & {
   status: LifecycleState;
-  notes: string | null;
-  fleet_visible_message: string | null;
-  contact_name: string | null;
-  contact_email: string | null;
-  contact_phone: string | null;
-  contact_title: string | null;
-  website: string | null;
-  primary_lanes: string | null;
-  fms_provider: string | null;
-  fms_other: string | null;
-  application_notes: string | null;
-  created_at: string;
+  organization_id: string | null;
 };
 
+// What approve_pilot_application (migration 027) returns.
+type ApprovalResult = {
+  application_id: string;
+  application_status: LifecycleState;
+  organization_id: string;
+  organization_name: string;
+  organization_created: boolean;
+  owner_id: string;
+};
+
+/**
+ * What approve_pilot_application accepts: a pending or in-review application,
+ * or one past approval that still has no organization (from before 027). A
+ * denied or archived one goes back to in review first.
+ */
+function canBeApproved(app: Pick<PilotApp, "status" | "organization_id">): boolean {
+  if (app.status === "pending" || app.status === "in_review") return true;
+  return APPROVED_STAGES.includes(app.status) && !app.organization_id;
+}
+
+const NO_NEW_ANSWERS = {
+  truck_count: null,
+  data_authorizer_name: null,
+  data_authorizer_email: null,
+  tablet_model: null,
+  tablet_count: null,
+  tablet_management: null,
+  safety_contact_name: null,
+  safety_contact_email: null,
+};
+
+// Demo ids are uuid-shaped so the demo shows the fleet:create step too.
 const DEMO_APPS: PilotApp[] = [
   {
-    id: "p1", user_id: "u1", company_name: "Swift Transport Logistics", truck_size: "Class 8", fleet_size: "1500",
+    id: "p1", user_id: "00000000-0000-4000-8000-0000000000d1", organization_id: null,
+    company_name: "Swift Transport Logistics", truck_size: null, fleet_size: "1500",
     status: "pending", notes: null, fleet_visible_message: null, contact_name: "Lori Chen", contact_email: "lori@swift.com",
-    contact_phone: null, contact_title: "VP Ops", website: null, primary_lanes: null, fms_provider: "Samsara", fms_other: null,
-    application_notes: null, created_at: "2026-04-30T10:00:00Z",
+    contact_phone: null, contact_title: "VP Ops", website: null, primary_lanes: "Phoenix yard; I-10 Phoenix to LA",
+    fms_provider: "Samsara", fms_other: null, application_notes: null, created_at: "2026-04-30T10:00:00Z",
+    ...NO_NEW_ANSWERS,
+    truck_count: 1500, data_authorizer_name: "Dee Fleetadmin", data_authorizer_email: "dee@swift.com",
+    safety_contact_name: "Ray Safety", safety_contact_email: "ray@swift.com",
+    tablet_model: "Galaxy Tab Active5", tablet_count: 1400, tablet_management: "fleet_mdm",
   },
   {
-    id: "p2", user_id: "u2", company_name: "National Carrier Partners", truck_size: "Class 6", fleet_size: "350",
+    id: "p2", user_id: "00000000-0000-4000-8000-0000000000d2", organization_id: null,
+    company_name: "National Carrier Partners", truck_size: "Class 6", fleet_size: "350",
     status: "in_review", notes: "Reference call scheduled.", fleet_visible_message: "Reference call Thursday 2pm CT.",
     contact_name: "Sam Patel", contact_email: "ops@national.com", contact_phone: null, contact_title: null,
     website: null, primary_lanes: "Dallas → Houston", fms_provider: "Geotab", fms_other: null, application_notes: null,
     created_at: "2026-04-22T10:00:00Z",
+    ...NO_NEW_ANSWERS,
   },
   {
-    id: "p3", user_id: "u3", company_name: "Alpha Freight", truck_size: "Class 8", fleet_size: "2000",
+    id: "p3", user_id: "00000000-0000-4000-8000-0000000000d3", organization_id: "30000000-0000-4000-8000-0000000000d3",
+    company_name: "Alpha Freight", truck_size: "Class 8", fleet_size: "2000",
     status: "approved", notes: null, fleet_visible_message: "Kickoff scheduled — check your email for the calendar invite.",
     contact_name: "Alex Kim", contact_email: "alex@alpha.com", contact_phone: null, contact_title: "COO",
     website: "https://alpha.example", primary_lanes: null, fms_provider: "Motive", fms_other: null, application_notes: null,
     created_at: "2026-04-15T10:00:00Z",
+    ...NO_NEW_ANSWERS,
   },
 ];
 
@@ -94,16 +124,30 @@ export default function PilotsTab({
 
   const applyBulkStatus = async (newStatus: LifecycleState) => {
     if (selected.size === 0) return;
+    // A stage past approval needs the organization that approval creates, so
+    // applications without one are left out (the database refuses them too,
+    // migration 027).
+    const skipped = APPROVED_STAGES.includes(newStatus)
+      ? apps.filter((a) => selected.has(a.id) && !a.organization_id).map((a) => a.id)
+      : [];
+    const ids = Array.from(selected).filter((id) => !skipped.includes(id));
+    const skippedNote = skipped.length
+      ? ` ${skipped.length} without an organization skipped: approve ${skipped.length === 1 ? "it" : "them"} first.`
+      : "";
+    if (ids.length === 0) {
+      toast.error(`Nothing moved.${skippedNote}`);
+      setBulkConfirmStatus(null);
+      return;
+    }
     setBulkBusy(true);
     if (isDemo) {
-      setApps((prev) => prev.map((a) => (selected.has(a.id) ? { ...a, status: newStatus } : a)));
+      setApps((prev) => prev.map((a) => (ids.includes(a.id) ? { ...a, status: newStatus } : a)));
       setSelected(new Set());
-      toast.success(`Demo: ${selected.size} pilots updated.`);
+      toast.success(`Demo: ${ids.length} pilots updated.${skippedNote}`);
       setBulkBusy(false);
       setBulkConfirmStatus(null);
       return;
     }
-    const ids = Array.from(selected);
     const { error } = await supabase
       .from("pilot_applications")
       .update({ status: newStatus, reviewed_at: new Date().toISOString() })
@@ -113,9 +157,9 @@ export default function PilotsTab({
       toast.error(error.message);
       return;
     }
-    setApps((prev) => prev.map((a) => (selected.has(a.id) ? { ...a, status: newStatus } : a)));
+    setApps((prev) => prev.map((a) => (ids.includes(a.id) ? { ...a, status: newStatus } : a)));
     setSelected(new Set());
-    toast.success(`${ids.length} pilots → ${newStatus.replace("_", " ")}.`);
+    toast.success(`${ids.length} pilots → ${newStatus.replace("_", " ")}.${skippedNote}`);
     setBulkConfirmStatus(null);
   };
 
@@ -186,8 +230,8 @@ export default function PilotsTab({
         {selected.size > 0 && (
           <div className="mb-4 flex flex-wrap items-center gap-2 p-3 rounded-lg bg-brand-cyan/10 border border-brand-cyan/30">
             <span className="text-sm text-brand-cyan font-semibold mr-2">{selected.size} selected</span>
+            {/* No bulk approve: approving creates the fleet's organization, one application at a time. */}
             <Button size="sm" variant="ghost" onClick={() => setBulkConfirmStatus("in_review")}>→ in review</Button>
-            <Button size="sm" variant="ghost" onClick={() => setBulkConfirmStatus("approved")}>→ approved</Button>
             <Button size="sm" variant="ghost" onClick={() => setBulkConfirmStatus("onboarding")}>→ onboarding</Button>
             <Button size="sm" variant="ghost" onClick={() => setBulkConfirmStatus("denied")}>→ denied</Button>
             <Button size="sm" variant="ghost" onClick={() => setBulkConfirmStatus("archived")}>→ archived</Button>
@@ -233,8 +277,10 @@ export default function PilotsTab({
                 </div>
                 <button onClick={() => setEditing(a)} className="text-left w-full">
                   <div className="flex flex-wrap gap-3 text-xs text-white/50 mb-3 items-center">
-                    <span className="inline-flex items-center gap-1"><Truck size={12} /> {a.truck_size || "N/A"}</span>
-                    <span>{a.fleet_size ? `${a.fleet_size} vehicles` : "N/A"}</span>
+                    <span className="inline-flex items-center gap-1">
+                      <Truck size={12} /> {trucksText(a) ? `${trucksText(a)} trucks` : "N/A"}
+                    </span>
+                    {a.truck_size && <span>{a.truck_size}</span>}
                     <span>· {new Date(a.created_at).toLocaleDateString()}</span>
                     {signedPilotIds.has(a.id) ? (
                       <span className="inline-flex items-center gap-1 text-emerald-400 text-[10px] uppercase tracking-widest font-semibold ml-auto px-2 py-0.5 rounded-full border border-emerald-400/30 bg-emerald-400/5">
@@ -260,9 +306,10 @@ export default function PilotsTab({
           app={editing}
           isDemo={isDemo}
           onClose={() => setEditing(null)}
-          onUpdated={(a) => {
+          onUpdated={(a, keepOpen) => {
             setApps((prev) => prev.map((p) => (p.id === a.id ? a : p)));
-            setEditing(null);
+            // After an approval the dialog stays open on the portal step.
+            setEditing(keepOpen ? a : null);
           }}
         />
       )}
@@ -320,7 +367,7 @@ function ManagePilotDialog({
   app: PilotApp;
   isDemo: boolean;
   onClose: () => void;
-  onUpdated: (a: PilotApp) => void;
+  onUpdated: (a: PilotApp, keepOpen?: boolean) => void;
 }) {
   const [status, setStatus] = useState<LifecycleState>(app.status);
   const [notes, setNotes] = useState(app.notes || "");
@@ -328,6 +375,34 @@ function ManagePilotDialog({
   const [busy, setBusy] = useState(false);
   type LoiPreview = { id: string; signed_at: string; initials: string; participant_name: string };
   const [loi, setLoi] = useState<LoiPreview | null>(null);
+  // The organization's own name, for the portal step. It can differ from the
+  // company on the application when the applicant already had one.
+  const [org, setOrg] = useState<{ id: string; name: string } | null>(null);
+  const portalStepRef = useRef<HTMLDivElement>(null);
+  const canApprove = canBeApproved(app);
+  const showPortalStep = !!app.organization_id && APPROVED_STAGES.includes(app.status);
+
+  useEffect(() => {
+    const id = app.organization_id;
+    if (!id || org?.id === id) return;
+    if (isDemo) {
+      setOrg({ id, name: app.company_name?.trim() || "Demo Fleet" });
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from("organizations").select("id, name").eq("id", id).maybeSingle();
+      if (!cancelled && data) setOrg(data as { id: string; name: string });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [app.organization_id, app.company_name, isDemo, org?.id]);
+
+  // Bring the portal step into view once it appears after an approval.
+  useEffect(() => {
+    if (showPortalStep) portalStepRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [showPortalStep]);
 
   // Look up the signed LOI tied to this pilot application (if any)
   useEffect(() => {
@@ -347,7 +422,115 @@ function ManagePilotDialog({
     })();
   }, [app.id, isDemo]);
 
+  // The approval: approve_pilot_application (migration 027) creates the
+  // fleet's organization and ties the application and the applicant to it.
+  // Changed notes and message are saved first, without the status or the
+  // review stamp, so the approval email that the status change sends already
+  // carries the message. If the approval is refused they are put back, so the
+  // fleet never sees a message written for an approval that did not happen;
+  // the text stays in the dialog. Returns null when nothing was approved.
+  const runApproval = async (): Promise<ApprovalResult | null> => {
+    const message = fleetMessage.trim() || null;
+    if (isDemo) {
+      return {
+        application_id: app.id,
+        application_status: APPROVED_STAGES.includes(app.status) ? app.status : "approved",
+        organization_id: app.organization_id ?? "30000000-0000-4000-8000-0000000000de",
+        organization_name: app.company_name?.trim() || "Demo Fleet",
+        organization_created: !app.organization_id,
+        owner_id: app.user_id,
+      };
+    }
+    const before = { notes: app.notes, fleet_visible_message: app.fleet_visible_message };
+    const changed = notes !== (app.notes || "") || message !== (app.fleet_visible_message?.trim() || null);
+    if (changed) {
+      const { error } = await supabase
+        .from("pilot_applications")
+        .update({ notes, fleet_visible_message: message })
+        .eq("id", app.id);
+      if (error) {
+        toast.error(error.message);
+        return null;
+      }
+    }
+    const { data, error } = await supabase.rpc("approve_pilot_application", { application_id: app.id });
+    if (error) {
+      let undo = "";
+      if (changed) {
+        const { error: undoError } = await supabase.from("pilot_applications").update(before).eq("id", app.id);
+        undo = undoError
+          ? ` The new message could not be taken back (${undoError.message}); clear it and save.`
+          : " Notes and message were not saved; your text is still here.";
+      }
+      toast.error(`Not approved: ${error.message}${undo}`);
+      return null;
+    }
+    return data as ApprovalResult;
+  };
+
+  const finishApproval = (result: ApprovalResult, finalStatus: LifecycleState) => {
+    setStatus(finalStatus);
+    setOrg({ id: result.organization_id, name: result.organization_name });
+    toast.success(
+      `${isDemo ? "Demo: " : ""}${result.organization_created ? "Approved. The fleet's organization is created." : "Approved."}`
+    );
+    onUpdated(
+      {
+        ...app,
+        status: finalStatus,
+        notes,
+        fleet_visible_message: fleetMessage.trim() || null,
+        organization_id: result.organization_id,
+      },
+      true
+    );
+  };
+
+  const approve = async () => {
+    setBusy(true);
+    const result = await runApproval();
+    setBusy(false);
+    if (result) finishApproval(result, result.application_status);
+  };
+
   const save = async () => {
+    // A stage past approval needs the organization, so it is reached through
+    // the approval, never a bare status change.
+    if (APPROVED_STAGES.includes(status) && !app.organization_id) {
+      if (!canApprove) {
+        toast.error(`This application is ${app.status.replace("_", " ")}. Move it back to in review, then approve it.`);
+        return;
+      }
+      setBusy(true);
+      const result = await runApproval();
+      if (!result) {
+        setBusy(false);
+        return;
+      }
+      let finalStatus = result.application_status;
+      if (status !== "approved" && status !== result.application_status) {
+        // The admin chose a later stage: move it there now that it has its
+        // organization (a second status email, for that stage).
+        if (isDemo) {
+          finalStatus = status;
+        } else {
+          const { data: session } = await supabase.auth.getSession();
+          const { error } = await supabase
+            .from("pilot_applications")
+            .update({
+              status,
+              reviewed_at: new Date().toISOString(),
+              reviewed_by: session.session?.user?.id ?? null,
+            })
+            .eq("id", app.id);
+          if (error) toast.error(`Approved, but not moved to ${status}: ${error.message}`);
+          else finalStatus = status;
+        }
+      }
+      setBusy(false);
+      finishApproval(result, finalStatus);
+      return;
+    }
     setBusy(true);
     if (isDemo) {
       onUpdated({ ...app, status, notes, fleet_visible_message: fleetMessage || null });
@@ -380,6 +563,15 @@ function ManagePilotDialog({
           <DialogTitle className="font-display">{app.company_name || "Pilot application"}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 py-4 max-h-[70vh] overflow-y-auto">
+          {showPortalStep && (
+            <div ref={portalStepRef}>
+              <PortalNextStep
+                name={org?.id === app.organization_id ? org.name : null}
+                organizationId={app.organization_id}
+                ownerId={app.user_id}
+              />
+            </div>
+          )}
           <ApplicantDetails app={app} />
           <div>
             <Label className="text-white/70 text-sm mb-2 block">Lifecycle stage</Label>
@@ -391,6 +583,11 @@ function ManagePilotDialog({
                 ))}
               </SelectContent>
             </Select>
+            {canApprove && (
+              <p className="text-xs text-white/40 mt-1">
+                Approve (or Save with approved) creates the fleet's organization and shows the portal step.
+              </p>
+            )}
           </div>
           <div>
             <Label className="text-white/70 text-sm mb-2 block">Message to fleet (shown on their dashboard)</Label>
@@ -433,13 +630,72 @@ function ManagePilotDialog({
           )}
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="ghost" onClick={onClose}>{showPortalStep && !canApprove ? "Close" : "Cancel"}</Button>
+          {canApprove && (
+            <Button onClick={approve} disabled={busy} className="bg-emerald-500 text-[#0B0E14] hover:bg-emerald-400 font-semibold">
+              {busy ? <Loader2 className="animate-spin mr-2" size={14} /> : null} Approve
+            </Button>
+          )}
           <Button onClick={save} disabled={busy} className="bg-brand-cyan text-[#0B0E14] hover:bg-brand-cyan/90">
             {busy ? <Loader2 className="animate-spin mr-2" size={14} /> : null} Save
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// After approval: the one staff step left on the portal side, with both ids
+// filled in, so nobody types SQL or looks an id up.
+function PortalNextStep({
+  name,
+  organizationId,
+  ownerId,
+}: {
+  name: string | null;
+  organizationId: string;
+  ownerId: string;
+}) {
+  const command = name === null ? null : fleetCreateCommand(name, organizationId, ownerId);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      toast.success("Command copied.");
+    } catch {
+      toast.error("Could not copy. Select the command and copy it by hand.");
+    }
+  };
+  return (
+    <div className="rounded-lg border border-emerald-400/30 bg-emerald-400/5 p-4 space-y-3">
+      <div className="flex items-center gap-2 text-sm font-medium text-emerald-300">
+        <CheckCircle2 size={16} /> Next step: create the fleet's portal
+      </div>
+      {name === null ? (
+        <p className="text-xs text-white/50">Loading the organization…</p>
+      ) : command ? (
+        <>
+          <p className="text-xs text-white/60 leading-relaxed">
+            Run this once in REA/trucklogics (the fleet:create command, REA #77). It creates the fleet's Client
+            Portal company, and this applicant becomes its owner the first time they sign in with their
+            cruzemaps.com account. Running it again changes nothing.
+          </p>
+          <pre
+            data-testid="fleet-create-command"
+            className="text-xs font-mono [font-variant-ligatures:none] text-white/90 bg-black/40 border border-white/10 rounded-md p-3 whitespace-pre-wrap break-all select-all"
+          >
+            {command}
+          </pre>
+          <Button size="sm" variant="outline" onClick={copy} className="border-white/15 text-white hover:bg-white/5">
+            <Copy size={12} className="mr-1.5" /> Copy command
+          </Button>
+        </>
+      ) : (
+        <p className="text-xs text-white/60">
+          Organization {organizationId} has no usable name or the applicant's id is missing, so the command cannot
+          be filled in.
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -450,13 +706,8 @@ function ApplicantDetails({ app }: { app: PilotApp }) {
     ["Title", app.contact_title],
     ["Phone", app.contact_phone],
     ["Website", app.website],
-    ["Lanes", app.primary_lanes],
-    [
-      "FMS",
-      app.fms_provider
-        ? `${app.fms_provider}${app.fms_other ? ` (${app.fms_other})` : ""}`
-        : null,
-    ],
+    ["Truck class", app.truck_size],
+    ...applicationAnswers(app),
     ["Applicant notes", app.application_notes],
   ].filter(([, v]) => v) as [string, string][];
 

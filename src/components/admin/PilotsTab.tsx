@@ -41,9 +41,14 @@ type ApprovalResult = {
   owner_id: string;
 };
 
-/** True until the application is approved and tied to an organization. */
-function needsApproval(app: Pick<PilotApp, "status" | "organization_id">): boolean {
-  return !APPROVED_STAGES.includes(app.status) || !app.organization_id;
+/**
+ * What approve_pilot_application accepts: a pending or in-review application,
+ * or one past approval that still has no organization (from before 027). A
+ * denied or archived one goes back to in review first.
+ */
+function canBeApproved(app: Pick<PilotApp, "status" | "organization_id">): boolean {
+  if (app.status === "pending" || app.status === "in_review") return true;
+  return APPROVED_STAGES.includes(app.status) && !app.organization_id;
 }
 
 const NO_NEW_ANSWERS = {
@@ -119,16 +124,30 @@ export default function PilotsTab({
 
   const applyBulkStatus = async (newStatus: LifecycleState) => {
     if (selected.size === 0) return;
+    // A stage past approval needs the organization that approval creates, so
+    // applications without one are left out (the database refuses them too,
+    // migration 027).
+    const skipped = APPROVED_STAGES.includes(newStatus)
+      ? apps.filter((a) => selected.has(a.id) && !a.organization_id).map((a) => a.id)
+      : [];
+    const ids = Array.from(selected).filter((id) => !skipped.includes(id));
+    const skippedNote = skipped.length
+      ? ` ${skipped.length} without an organization skipped: approve ${skipped.length === 1 ? "it" : "them"} first.`
+      : "";
+    if (ids.length === 0) {
+      toast.error(`Nothing moved.${skippedNote}`);
+      setBulkConfirmStatus(null);
+      return;
+    }
     setBulkBusy(true);
     if (isDemo) {
-      setApps((prev) => prev.map((a) => (selected.has(a.id) ? { ...a, status: newStatus } : a)));
+      setApps((prev) => prev.map((a) => (ids.includes(a.id) ? { ...a, status: newStatus } : a)));
       setSelected(new Set());
-      toast.success(`Demo: ${selected.size} pilots updated.`);
+      toast.success(`Demo: ${ids.length} pilots updated.${skippedNote}`);
       setBulkBusy(false);
       setBulkConfirmStatus(null);
       return;
     }
-    const ids = Array.from(selected);
     const { error } = await supabase
       .from("pilot_applications")
       .update({ status: newStatus, reviewed_at: new Date().toISOString() })
@@ -138,9 +157,9 @@ export default function PilotsTab({
       toast.error(error.message);
       return;
     }
-    setApps((prev) => prev.map((a) => (selected.has(a.id) ? { ...a, status: newStatus } : a)));
+    setApps((prev) => prev.map((a) => (ids.includes(a.id) ? { ...a, status: newStatus } : a)));
     setSelected(new Set());
-    toast.success(`${ids.length} pilots → ${newStatus.replace("_", " ")}.`);
+    toast.success(`${ids.length} pilots → ${newStatus.replace("_", " ")}.${skippedNote}`);
     setBulkConfirmStatus(null);
   };
 
@@ -360,7 +379,7 @@ function ManagePilotDialog({
   // company on the application when the applicant already had one.
   const [org, setOrg] = useState<{ id: string; name: string } | null>(null);
   const portalStepRef = useRef<HTMLDivElement>(null);
-  const canApprove = needsApproval(app);
+  const canApprove = canBeApproved(app);
   const showPortalStep = !!app.organization_id && APPROVED_STAGES.includes(app.status);
 
   useEffect(() => {
@@ -403,60 +422,115 @@ function ManagePilotDialog({
     })();
   }, [app.id, isDemo]);
 
-  // Approve runs approve_pilot_application (migration 027), which creates the
+  // The approval: approve_pilot_application (migration 027) creates the
   // fleet's organization and ties the application and the applicant to it.
   // Changed notes and message are saved first, without the status or the
   // review stamp, so the approval email that the status change sends already
-  // carries the message.
-  const approve = async () => {
+  // carries the message. If the approval is refused they are put back, so the
+  // fleet never sees a message written for an approval that did not happen;
+  // the text stays in the dialog. Returns null when nothing was approved.
+  const runApproval = async (): Promise<ApprovalResult | null> => {
     const message = fleetMessage.trim() || null;
-    setBusy(true);
     if (isDemo) {
-      const approved: LifecycleState = APPROVED_STAGES.includes(app.status) ? app.status : "approved";
-      const organizationId = app.organization_id ?? "30000000-0000-4000-8000-0000000000de";
-      setStatus(approved);
-      setOrg({ id: organizationId, name: app.company_name?.trim() || "Demo Fleet" });
-      onUpdated({ ...app, status: approved, notes, fleet_visible_message: message, organization_id: organizationId }, true);
-      toast.success("Demo: approved locally.");
-      setBusy(false);
-      return;
+      return {
+        application_id: app.id,
+        application_status: APPROVED_STAGES.includes(app.status) ? app.status : "approved",
+        organization_id: app.organization_id ?? "30000000-0000-4000-8000-0000000000de",
+        organization_name: app.company_name?.trim() || "Demo Fleet",
+        organization_created: !app.organization_id,
+        owner_id: app.user_id,
+      };
     }
-    if (notes !== (app.notes || "") || message !== (app.fleet_visible_message?.trim() || null)) {
+    const before = { notes: app.notes, fleet_visible_message: app.fleet_visible_message };
+    const changed = notes !== (app.notes || "") || message !== (app.fleet_visible_message?.trim() || null);
+    if (changed) {
       const { error } = await supabase
         .from("pilot_applications")
         .update({ notes, fleet_visible_message: message })
         .eq("id", app.id);
       if (error) {
-        setBusy(false);
         toast.error(error.message);
-        return;
+        return null;
       }
     }
     const { data, error } = await supabase.rpc("approve_pilot_application", { application_id: app.id });
-    setBusy(false);
     if (error) {
-      toast.error(`Not approved: ${error.message}`);
-      return;
+      let undo = "";
+      if (changed) {
+        const { error: undoError } = await supabase.from("pilot_applications").update(before).eq("id", app.id);
+        undo = undoError
+          ? ` The new message could not be taken back (${undoError.message}); clear it and save.`
+          : " Notes and message were not saved; your text is still here.";
+      }
+      toast.error(`Not approved: ${error.message}${undo}`);
+      return null;
     }
-    const result = data as ApprovalResult;
-    setStatus(result.application_status);
+    return data as ApprovalResult;
+  };
+
+  const finishApproval = (result: ApprovalResult, finalStatus: LifecycleState) => {
+    setStatus(finalStatus);
     setOrg({ id: result.organization_id, name: result.organization_name });
-    toast.success(result.organization_created ? "Approved. The fleet's organization is created." : "Approved.");
+    toast.success(
+      `${isDemo ? "Demo: " : ""}${result.organization_created ? "Approved. The fleet's organization is created." : "Approved."}`
+    );
     onUpdated(
       {
         ...app,
-        status: result.application_status,
+        status: finalStatus,
         notes,
-        fleet_visible_message: message,
+        fleet_visible_message: fleetMessage.trim() || null,
         organization_id: result.organization_id,
       },
       true
     );
   };
 
+  const approve = async () => {
+    setBusy(true);
+    const result = await runApproval();
+    setBusy(false);
+    if (result) finishApproval(result, result.application_status);
+  };
+
   const save = async () => {
-    // Saving with "approved" is the same approval, never a bare status change.
-    if (status === "approved" && canApprove) return approve();
+    // A stage past approval needs the organization, so it is reached through
+    // the approval, never a bare status change.
+    if (APPROVED_STAGES.includes(status) && !app.organization_id) {
+      if (!canApprove) {
+        toast.error(`This application is ${app.status.replace("_", " ")}. Move it back to in review, then approve it.`);
+        return;
+      }
+      setBusy(true);
+      const result = await runApproval();
+      if (!result) {
+        setBusy(false);
+        return;
+      }
+      let finalStatus = result.application_status;
+      if (status !== "approved" && status !== result.application_status) {
+        // The admin chose a later stage: move it there now that it has its
+        // organization (a second status email, for that stage).
+        if (isDemo) {
+          finalStatus = status;
+        } else {
+          const { data: session } = await supabase.auth.getSession();
+          const { error } = await supabase
+            .from("pilot_applications")
+            .update({
+              status,
+              reviewed_at: new Date().toISOString(),
+              reviewed_by: session.session?.user?.id ?? null,
+            })
+            .eq("id", app.id);
+          if (error) toast.error(`Approved, but not moved to ${status}: ${error.message}`);
+          else finalStatus = status;
+        }
+      }
+      setBusy(false);
+      finishApproval(result, finalStatus);
+      return;
+    }
     setBusy(true);
     if (isDemo) {
       onUpdated({ ...app, status, notes, fleet_visible_message: fleetMessage || null });

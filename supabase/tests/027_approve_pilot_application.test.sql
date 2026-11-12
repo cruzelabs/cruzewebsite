@@ -15,13 +15,19 @@
 --   * a second call returns the same organization and changes nothing: no
 --     new organization, no audit row, no update and no webhook
 --   * onboarding stays onboarding; an application approved before 027 gets
---     its organization; an applicant who already belongs to a fleet
---     organization keeps it and the application joins it
---   * refused with nothing changed: a profile and an application that name
---     different organizations, a city organization, an archived, suspended or
---     admin applicant, a blank company name, a denied application whose
---     applicant has another open one, and, with 022's confirm-email switch on,
---     an applicant who never confirmed their email
+--     its organization, and one with an organization but no reviewer gets a
+--     reviewer; an applicant who already belongs to a fleet organization of
+--     the same company keeps it and the application joins it
+--   * refused with nothing changed: a denied or archived application (until
+--     it is moved back to in_review), a profile and an application that name
+--     different organizations, a profile organization for another company, a
+--     city organization, an archived, suspended or admin applicant, a blank
+--     company name, and, with 022's confirm-email switch on, an applicant who
+--     never confirmed their email
+--   * the guard trigger: no move into approved, onboarding or active, and no
+--     clearing of the organization there, without an organization (23514),
+--     for an admin's direct update or an insert; rows already there from
+--     before 027 can still be edited
 --
 -- Runs against a throwaway Postgres. Never run it against a real project.
 -- From the repo root:
@@ -155,6 +161,21 @@ begin
   raise exception 'FAILED: expected an error from % as %', p_sql, p_role;
 end $$;
 
+create function pg_temp.exec_as(p_sql text, p_role text, p_sub text) returns bigint language plpgsql as $$
+declare n bigint;
+begin
+  execute format('set local role %I', p_role);
+  perform set_config('request.jwt.claim.sub', coalesce(p_sub, ''), true);
+  if current_user <> p_role then
+    raise exception 'FAILED: exec_as did not switch to %', p_role;
+  end if;
+  execute p_sql;
+  get diagnostics n = row_count;
+  execute 'reset role';
+  perform set_config('request.jwt.claim.sub', '', true);
+  return n;
+end $$;
+
 create function pg_temp.approve_as(p_app uuid, p_sub text) returns jsonb language plpgsql as $$
 declare r jsonb;
 begin
@@ -211,9 +232,16 @@ end $$;
 \set u12 '''00000000-0000-0000-0000-000000000c12'''
 \set u13 '''00000000-0000-0000-0000-000000000c13'''
 \set u14 '''00000000-0000-0000-0000-000000000c14'''
+\set u15 '''00000000-0000-0000-0000-000000000c15'''
+\set u16 '''00000000-0000-0000-0000-000000000c16'''
+\set u17 '''00000000-0000-0000-0000-000000000c17'''
+\set u18 '''00000000-0000-0000-0000-000000000c18'''
+\set u19 '''00000000-0000-0000-0000-000000000c19'''
 \set orgx '''30000000-0000-0000-0000-00000000000a'''
 \set orgy '''30000000-0000-0000-0000-00000000000b'''
 \set orgcity '''30000000-0000-0000-0000-00000000000c'''
+\set orgz '''30000000-0000-0000-0000-00000000000d'''
+\set orgw '''30000000-0000-0000-0000-00000000000e'''
 \set app1 '''40000000-0000-0000-0000-000000000001'''
 \set app2 '''40000000-0000-0000-0000-000000000002'''
 \set app3 '''40000000-0000-0000-0000-000000000003'''
@@ -229,16 +257,23 @@ end $$;
 \set app12 '''40000000-0000-0000-0000-000000000012'''
 \set app13 '''40000000-0000-0000-0000-000000000013'''
 \set app14 '''40000000-0000-0000-0000-000000000014'''
+\set app15 '''40000000-0000-0000-0000-000000000015'''
+\set app16 '''40000000-0000-0000-0000-000000000016'''
+\set app17 '''40000000-0000-0000-0000-000000000017'''
+\set app18 '''40000000-0000-0000-0000-000000000018'''
+\set app19 '''40000000-0000-0000-0000-000000000019'''
 \set nope '''40000000-0000-0000-0000-0000000000ff'''
 
 insert into auth.users (id, email, email_confirmed_at)
 select u, 'user-' || right(u::text, 3) || '@example.com', now()
-from unnest(array[:adm, :adm2, :u1, :u2, :u3, :u4, :u5, :u6, :u7, :u8, :u9, :u10, :u11, :u13, :u14]::uuid[]) u;
+from unnest(array[:adm, :adm2, :u1, :u2, :u3, :u4, :u5, :u6, :u7, :u8, :u9, :u10, :u11, :u13, :u14,
+                  :u15, :u16, :u17, :u18, :u19]::uuid[]) u;
 insert into auth.users (id, email, email_confirmed_at) values (:u12, 'unconfirmed@example.com', null);
 
 insert into public.profiles (id, role, status)
 select u, 'fleet_owner', 'active'
-from unnest(array[:u1, :u2, :u3, :u7, :u8, :u9, :u10, :u11, :u12, :u13, :u14]::uuid[]) u
+from unnest(array[:u1, :u2, :u3, :u7, :u8, :u9, :u10, :u11, :u12, :u13, :u14,
+                  :u15, :u16, :u17, :u18, :u19]::uuid[]) u
 on conflict (id) do update set role = excluded.role, status = excluded.status;
 insert into public.profiles (id, role, status) values
   (:adm, 'admin', 'active'), (:adm2, 'admin', 'suspended'),
@@ -248,8 +283,12 @@ on conflict (id) do update set role = excluded.role, status = excluded.status;
 insert into public.organizations (id, name, org_type, status) values
   (:orgx, 'Three Freight', 'fleet', 'active'),
   (:orgy, 'Seven Freight', 'fleet', 'active'),
-  (:orgcity, 'City of Example', 'city', 'active');
+  (:orgcity, 'City of Example', 'city', 'active'),
+  (:orgz, 'Other Fleet Inc', 'fleet', 'active'),
+  (:orgw, 'Seventeen Freight', 'fleet', 'active');
 update public.profiles set organization_id = :orgx where id in (:u3, :u7);
+update public.profiles set organization_id = :orgz where id = :u15;
+update public.profiles set organization_id = :orgw where id = :u17;
 
 insert into public.pilot_applications (id, user_id, company_name, fleet_size, truck_count, website, status, organization_id) values
   (:app1, :u1, '  One Freight  ', '140', 140, 'https://one.example', 'pending', null),
@@ -266,7 +305,12 @@ insert into public.pilot_applications (id, user_id, company_name, fleet_size, tr
   (:app11, :u11, 'Eleven Freight', '12', 12, null, 'denied', null),
   (:app12, :u12, 'Twelve Freight', '12', 12, null, 'pending', null),
   (:app13, :u13, 'Thirteen Freight', '501-1500', null, null, 'approved', null),
-  (:app14, :u14, 'Fourteen Freight', '12', 12, null, 'pending', null);
+  (:app14, :u14, 'Fourteen Freight', '12', 12, null, 'pending', null),
+  (:app15, :u15, 'Fifteen Freight', '12', 12, null, 'pending', null),
+  (:app16, :u16, 'Sixteen Freight', '12', 12, null, 'archived', null),
+  (:app17, :u17, 'Seventeen Freight', '12', 12, null, 'approved', :orgw),
+  (:app18, :u18, 'Eighteen Freight', '12', 12, null, 'pending', null),
+  (:app19, :u19, 'Nineteen Freight', '12', 12, null, 'active', null);
 
 -- ---------------------------------------------------------------------------
 -- Apply 027, twice.
@@ -305,14 +349,15 @@ rollback;
 begin;
 select pg_temp.fails_as(pg_temp.approve_sql(:nope), 'authenticated', :adm, 'P0002');
 rollback;
-select pg_temp.ok((select count(*) from public.organizations) = 3, 'no organization created by a refused call');
+select pg_temp.ok((select count(*) from public.organizations) = 5, 'no organization created by a refused call');
 
 -- ---------------------------------------------------------------------------
 -- An admin approves app1.
 -- ---------------------------------------------------------------------------
 create temp table before1 as
   select (select count(*) from supabase_functions.calls where tbl = 'pilot_applications' and op = 'UPDATE') as updates,
-         (select count(*) from public.role_history) as history;
+         (select count(*) from public.role_history) as history,
+         (select count(*) from public.organizations) as orgs;
 create temp table r1 as select pg_temp.approve_as(:app1, :adm) as r;
 
 select pg_temp.ok((select r->>'application_status' = 'approved'
@@ -341,7 +386,8 @@ select pg_temp.ok((select count(*) from public.role_history h
 select pg_temp.ok((select count(*) from supabase_functions.calls where tbl = 'pilot_applications' and op = 'UPDATE')
     = (select updates from before1) + 1,
   'one UPDATE webhook (the approval email)');
-select pg_temp.ok((select count(*) from public.organizations) = 4, 'exactly one organization was created');
+select pg_temp.ok((select count(*) from public.organizations) = (select orgs from before1) + 1,
+  'exactly one organization was created');
 
 -- The same approval again: nothing new.
 create temp table before2 as
@@ -376,32 +422,57 @@ select pg_temp.ok((select a.status = 'approved' and a.organization_id is not nul
   from public.pilot_applications a where a.id = :app13),
   'an application approved before 027 gets its organization');
 
+-- 'Three Freight LLC' and the profile's 'Three Freight' are the same company.
 create temp table r_app3 as select pg_temp.approve_as(:app3, :adm) as r;
 select pg_temp.ok((select (r->>'organization_id')::uuid = :orgx and not (r->>'organization_created')::boolean
     and r->>'organization_name' = 'Three Freight' from r_app3)
   and (select organization_id = :orgx and status = 'approved' from public.pilot_applications where id = :app3)
   and (select count(*) from public.role_history where user_id = :u3) = 0,
-  'an applicant who already belongs to a fleet organization keeps it; the application joins it');
+  'an applicant who already belongs to the same company''s fleet organization keeps it; the application joins it');
+
+-- Approved before 027 with its organization but no reviewer: it gets one,
+-- once.
+create temp table before17 as select (select count(*) from public.organizations) as orgs;
+select pg_temp.approve_as(:app17, :adm);
+select pg_temp.ok((select a.reviewed_by = :adm and a.reviewed_at is not null and a.organization_id = :orgw
+    and a.status = 'approved' from public.pilot_applications a where a.id = :app17)
+  and (select count(*) from public.organizations) = (select orgs from before17)
+  and (select count(*) from public.role_history where user_id = :u17) = 0,
+  'an approved application with an organization but no reviewer gets the reviewer, nothing else');
+create temp table before17b as select pg_temp.state(:app17) as s,
+  (select reviewed_at from public.pilot_applications where id = :app17) as reviewed_at;
+select pg_temp.approve_as(:app17, :u6);
+select pg_temp.ok((select s from before17b) = pg_temp.state(:app17)
+    and (select reviewed_at from before17b) = (select reviewed_at from public.pilot_applications where id = :app17),
+  'and a second call changes nothing');
 
 -- ---------------------------------------------------------------------------
 -- Refusals.
 -- ---------------------------------------------------------------------------
 begin;
 select pg_temp.refused(:app7, :adm, '22023', 'a profile and an application that name different organizations');
+select pg_temp.refused(:app15, :adm, '22023', 'a profile organization for another company');
 select pg_temp.refused(:app8, :adm, '22023', 'a city organization');
 select pg_temp.refused(:app4, :adm, '22023', 'an archived applicant');
 select pg_temp.refused(:app5, :adm, '22023', 'a suspended applicant');
 select pg_temp.refused(:app6, :adm, '22023', 'an admin applicant');
 select pg_temp.refused(:app9, :adm, '22023', 'a blank company name');
-select pg_temp.refused(:app10a, :adm, '22023', 'a denied application whose applicant has another open one');
+select pg_temp.refused(:app10a, :adm, '22023', 'a denied application');
+select pg_temp.refused(:app11, :adm, '22023', 'a denied application, the applicant''s only one');
+select pg_temp.refused(:app16, :adm, '22023', 'an archived application');
 rollback;
 
 select pg_temp.approve_as(:app10b, :adm);
 select pg_temp.ok((select status = 'approved' from public.pilot_applications where id = :app10b),
   'the applicant''s open application can be approved');
+-- A denied application is reopened by moving it back to in_review.
+begin;
+select pg_temp.ok(pg_temp.exec_as(format($q$update public.pilot_applications set status = 'in_review' where id = %L$q$, :app11),
+  'authenticated', :adm) = 1, 'an admin moves a denied application back to in_review');
+commit;
 select pg_temp.approve_as(:app11, :adm);
 select pg_temp.ok((select status = 'approved' and organization_id is not null from public.pilot_applications where id = :app11),
-  'a denied application can be approved when it is the only one');
+  'a denied application moved back to in_review can be approved');
 
 -- 022's switch for the day "Confirm email" is on.
 create or replace function public.invite_requires_confirmed_email()
@@ -417,6 +488,46 @@ returns boolean language sql immutable set search_path = public as $$ select fal
 select pg_temp.approve_as(:app12, :adm);
 select pg_temp.ok((select status = 'approved' from public.pilot_applications where id = :app12),
   'with the switch off an unconfirmed email is approved, as accept_invitation allows');
+
+-- ---------------------------------------------------------------------------
+-- The guard: no move into approved, onboarding or active without an
+-- organization, whoever makes it.
+-- ---------------------------------------------------------------------------
+create function pg_temp.update_sql(p_app uuid, p_set text) returns text language sql as $$
+  select format('update public.pilot_applications set %s where id = %L', p_set, p_app)
+$$;
+begin;
+select pg_temp.fails_as(pg_temp.update_sql(:app18, $$status = 'approved'$$), 'authenticated', :adm, '23514');
+rollback;
+begin;
+select pg_temp.fails_as(pg_temp.update_sql(:app18, $$status = 'onboarding'$$), 'authenticated', :adm, '23514');
+rollback;
+begin;
+select pg_temp.fails_as(pg_temp.update_sql(:app18, $$status = 'active', reviewed_at = now()$$), 'authenticated', :adm, '23514');
+rollback;
+begin;
+select pg_temp.fails_as(pg_temp.update_sql(:app1, 'organization_id = null'), 'authenticated', :adm, '23514');
+rollback;
+begin;
+select pg_temp.fails_as(format($q$insert into public.pilot_applications (user_id, company_name, status)
+  values (%L, 'Sixteen Freight', 'approved')$q$, :u16), 'postgres', null, '23514');
+rollback;
+begin;
+select pg_temp.ok(pg_temp.exec_as(pg_temp.update_sql(:app18, $$status = 'denied'$$), 'authenticated', :adm) = 1,
+  'a move to denied needs no organization');
+select pg_temp.ok(pg_temp.exec_as(pg_temp.update_sql(:app1, $$status = 'onboarding'$$), 'authenticated', :adm) = 1,
+  'an approved application with its organization moves on to onboarding');
+rollback;
+-- app19 was active without an organization before 027: still editable, but
+-- it moves only after its approval.
+begin;
+select pg_temp.ok(pg_temp.exec_as(pg_temp.update_sql(:app19, $$notes = 'call Tuesday'$$), 'authenticated', :adm) = 1,
+  'a row already past approval without an organization can still be edited');
+select pg_temp.fails_as(pg_temp.update_sql(:app19, $$status = 'onboarding'$$), 'authenticated', :adm, '23514');
+commit;
+select pg_temp.approve_as(:app19, :adm);
+select pg_temp.ok((select status = 'active' and organization_id is not null from public.pilot_applications where id = :app19),
+  'approving it keeps it active and gives it its organization');
 
 -- Every approved application and its applicant share one fleet organization.
 select pg_temp.ok(not exists (

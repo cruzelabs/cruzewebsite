@@ -6,7 +6,11 @@
 //     command with both ids, which Copy puts on the clipboard
 //   - Save on an application already set to approved without an
 //     organization runs the same approval, never a bare status update
-//   - a refused approval shows the reason and no portal step
+//   - a refused approval shows the reason and no portal step, and puts back
+//     a message it had saved first
+//   - a denied application offers no Approve; Save on a later stage with no
+//     organization approves it and keeps the stage
+//   - bulk onboarding skips applications without an organization
 //   - reopening an approved application shows the step with the
 //     organization's own name, and no Approve button
 //   - the bulk bar offers no approve
@@ -18,14 +22,20 @@ type Result = { data: unknown; error: { code?: string; message: string } | null 
 
 const sb = vi.hoisted(() => {
   const queues: Record<string, Result[]> = {};
-  const events: { kind: string; table?: string; payload?: unknown }[] = [];
+  const events: { kind: string; table?: string; payload?: unknown; ids?: unknown }[] = [];
   const from = (table: string) => {
     const builder: Record<string, unknown> = {};
-    for (const m of ["select", "order", "limit", "eq", "in", "maybeSingle"]) {
+    let last: { ids?: unknown } | null = null;
+    for (const m of ["select", "order", "limit", "eq", "maybeSingle"]) {
       builder[m] = () => builder;
     }
+    builder.in = (_col: string, ids: unknown) => {
+      if (last) last.ids = ids;
+      return builder;
+    };
     builder.update = (payload: unknown) => {
-      events.push({ kind: "update", table, payload });
+      last = { kind: "update", table, payload } as { ids?: unknown };
+      events.push(last as { kind: string });
       return builder;
     };
     builder.then = (resolve: (r: Result) => unknown, reject: (e: unknown) => unknown) =>
@@ -154,6 +164,49 @@ describe("PilotsTab approval", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect((await screen.findByTestId("fleet-create-command")).textContent).toBe(COMMAND);
     expect(sb.events.map((e) => e.kind)).toEqual(["rpc"]);
+  });
+
+  it("puts a pre-saved message back when the approval is refused", async () => {
+    await openDialog(app({ fleet_visible_message: "Old note", notes: "kept" }));
+    sb.queues.pilot_applications.push({ data: null, error: null }, { data: null, error: null });
+    sb.rpcResults.push({ data: null, error: { code: "22023", message: "approve_pilot_application: no" } });
+    fireEvent.change(screen.getByPlaceholderText(/Kickoff call link/), { target: { value: "You're approved!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(sb.events.map((e) => e.kind)).toEqual(["update", "rpc", "update"]));
+    expect(sb.events[0].payload).toEqual({ notes: "kept", fleet_visible_message: "You're approved!" });
+    expect(sb.events[2].payload).toEqual({ notes: "kept", fleet_visible_message: "Old note" });
+    expect(screen.queryByTestId("fleet-create-command")).toBeNull();
+  });
+
+  it("offers no Approve on a denied application", async () => {
+    await openDialog(app({ status: "denied" }));
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+
+  it("approves a later-stage application with no organization on Save, keeping its stage", async () => {
+    await openDialog(app({ status: "onboarding" }));
+    sb.rpcResults.push({ data: approval({ application_status: "onboarding" }), error: null });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByTestId("fleet-create-command")).textContent).toBe(COMMAND);
+    expect(sb.events.map((e) => e.kind)).toEqual(["rpc"]);
+  });
+
+  it("bulk onboarding skips applications without an organization", async () => {
+    const other = app({ id: "40000000-0000-0000-0000-000000000002", company_name: "Beta Freight", status: "approved", organization_id: ORG });
+    sb.queues.pilot_applications = [{ data: [app(), other], error: null }, { data: null, error: null }];
+    sb.queues.loi_signatures = [{ data: [], error: null }];
+    render(
+      <MemoryRouter>
+        <PilotsTab isDemo={false} />
+      </MemoryRouter>
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select Acme Freight" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Beta Freight" }));
+    fireEvent.click(screen.getByRole("button", { name: "→ onboarding" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(sb.events.length).toBe(1));
+    expect(sb.events[0].ids).toEqual([other.id]);
+    expect((sb.events[0].payload as { status: string }).status).toBe("onboarding");
   });
 
   it("shows why an approval was refused, and no portal step", async () => {

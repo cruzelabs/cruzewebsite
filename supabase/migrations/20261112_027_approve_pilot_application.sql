@@ -7,9 +7,10 @@
 -- dialog's Approve now calls instead of a plain status update. In one
 -- transaction it:
 --   1. finds the application's organization: the one the application already
---      has, else the one the applicant's profile already has, else a new
---      organizations row (org_type fleet, status active) named after the
---      application's company and created by the caller;
+--      has, else the one the applicant's profile already has when its name
+--      matches the application's company (normalize_company_name, 023), else
+--      a new organizations row (org_type fleet, status active) named after
+--      the application's company and created by the caller;
 --   2. sets organization_id on the application and on the applicant's
 --      profile, and writes a role_history row when the profile's organization
 --      changes (role and status stay as they are, like start_impersonation);
@@ -26,22 +27,34 @@
 -- It refuses, with nothing changed:
 --   * a caller who is not an active admin (42501), as change_user_role (002)
 --     and start_impersonation (017) do;
+--   * a denied or archived application. Move it back to in_review first, so
+--     an approval from a dialog opened before someone denied it cannot undo
+--     the denial;
 --   * an applicant whose account is not an active fleet_owner, since the
 --     account becomes the fleet's owner;
 --   * an applicant whose profile names a different organization than the
---     application, or an organization that is not a fleet;
+--     application, or an organization whose name does not match the
+--     application's company, or one that is not a fleet. A person belongs to
+--     one organization, so moving them is a decision for a person;
 --   * an application with no company name, which would name the organization;
---   * a denied or archived application when the applicant has another open
---     one (the one-open-application index would refuse it anyway);
 --   * when invite_requires_confirmed_email() is true (022's switch for the
 --     day "Confirm email" is turned on), an applicant whose email address was
 --     never confirmed.
 --
+-- Guard: a trigger refuses any change that puts an application into
+-- approved, onboarding or active, or clears its organization there, without
+-- an organization (23514). So the old status dropdown, the bulk bar or a
+-- direct update cannot skip the approval. Rows already in those stages
+-- without one can still be edited and approved; only the move is checked.
+-- The live site's old dropdown hits this guard, so apply this file when the
+-- site with the new Approve button is published.
+--
 -- SECURITY DEFINER with a fixed search_path; EXECUTE for authenticated and
 -- service_role only, as 021 left the other admin functions.
 --
--- Idempotent: safe to run more than once. Needs 002, 017 and 022 (it uses
--- is_admin() and invite_requires_confirmed_email()).
+-- Idempotent: safe to run more than once. Needs 002, 017, 022 and 023 (it
+-- uses is_admin(), invite_requires_confirmed_email() and
+-- normalize_company_name()).
 -- Test: supabase/tests/027_approve_pilot_application.test.sql
 -- ============================================================================
 
@@ -76,6 +89,11 @@ begin
     raise exception 'approve_pilot_application: no application with that id'
       using errcode = 'P0002';
   end if;
+  if v_app.status in ('denied', 'archived') then
+    raise exception 'approve_pilot_application: the application is %. Move it back to in_review, then approve.',
+      v_app.status
+      using errcode = '22023';
+  end if;
 
   select * into v_profile
   from public.profiles p
@@ -104,15 +122,8 @@ begin
     end if;
   end if;
 
-  if v_app.status in ('denied', 'archived') and exists (
-    select 1 from public.pilot_applications o
-    where o.user_id = v_app.user_id and o.id <> v_app.id and o.status not in ('denied', 'archived')
-  ) then
-    raise exception 'approve_pilot_application: the applicant has another open application. Approve that one instead.'
-      using errcode = '22023';
-  end if;
-
-  -- The organization: the application's, else the profile's, else a new one.
+  -- The organization: the application's, else the profile's when it is the
+  -- same company, else a new one.
   if v_app.organization_id is not null
      and v_profile.organization_id is not null
      and v_app.organization_id <> v_profile.organization_id then
@@ -129,6 +140,13 @@ begin
     if v_org_type is distinct from 'fleet' then
       raise exception 'approve_pilot_application: organization % is a % organization, not a fleet',
         v_org_id, coalesce(v_org_type, 'missing')
+        using errcode = '22023';
+    end if;
+    -- Only the profile named it: join it only when it is the same company.
+    if v_app.organization_id is null
+       and public.normalize_company_name(v_org_name) <> public.normalize_company_name(v_app.company_name) then
+      raise exception 'approve_pilot_application: the applicant already belongs to organization "%" (%), and this application is for "%". A person belongs to one organization, so link them by hand.',
+        v_org_name, v_org_id, btrim(coalesce(v_app.company_name, ''))
         using errcode = '22023';
     end if;
   else
@@ -158,7 +176,12 @@ begin
 
   v_status := case when v_app.status in ('approved', 'onboarding', 'active') then v_app.status else 'approved' end;
 
-  if v_app.organization_id is distinct from v_org_id or v_app.status is distinct from v_status then
+  -- Update only what is missing, so a second call changes nothing. A row
+  -- approved before 027 without a reviewer gets one.
+  if v_app.organization_id is distinct from v_org_id
+     or v_app.status is distinct from v_status
+     or v_app.reviewed_by is null
+     or v_app.reviewed_at is null then
     update public.pilot_applications a
     set organization_id = v_org_id,
         status = v_status,
@@ -187,6 +210,38 @@ grant execute on function public.approve_pilot_application(uuid) to authenticate
 comment on function public.approve_pilot_application(uuid) is
   'Admin only. Approves a pilot application and ties it and its applicant to a fleet organization, creating one if needed. Safe to call twice. Migration 027.';
 
+-- The guard: no move into approved, onboarding or active without an
+-- organization, whoever makes it. A trigger and not a check constraint, so
+-- rows that are already in those stages without one (from before 027) can
+-- still be edited, and approved.
+create or replace function public.pilot_application_requires_organization()
+returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+  if new.status in ('approved', 'onboarding', 'active')
+     and new.organization_id is null
+     and (tg_op = 'INSERT'
+          or old.status is distinct from new.status
+          or old.organization_id is distinct from new.organization_id) then
+    raise exception 'pilot_applications: an application needs its organization before it is %. Approve it with approve_pilot_application.',
+      new.status
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+-- Only the trigger calls it; Postgres checks EXECUTE when the trigger is
+-- created, not when it fires.
+revoke all on function public.pilot_application_requires_organization() from public, anon, authenticated;
+
+drop trigger if exists pilot_application_requires_organization on public.pilot_applications;
+create trigger pilot_application_requires_organization
+  before insert or update of status, organization_id on public.pilot_applications
+  for each row execute function public.pilot_application_requires_organization();
+
 notify pgrst, 'reload schema';
 
 -- ----------------------------------------------------------------------------
@@ -198,9 +253,18 @@ notify pgrst, 'reload schema';
 --   from pg_proc p
 --   where p.oid = 'public.approve_pilot_application(uuid)'::regprocedure;
 --   -> true, {"search_path=public, pg_temp"}, false, true, false
+--   select count(*) from pg_trigger
+--    where tgname = 'pilot_application_requires_organization' and not tgisinternal;
+--   -> 1
+--   Applications already past approval without an organization (approve each
+--   one in the admin dialog):
+--   select id, company_name, status from public.pilot_applications
+--    where status in ('approved', 'onboarding', 'active') and organization_id is null;
 --
 -- Rollback (by hand): the site's Approve then fails with "function not
 -- found", so publish the site from before this change first.
+--   drop trigger pilot_application_requires_organization on public.pilot_applications;
+--   drop function public.pilot_application_requires_organization();
 --   drop function public.approve_pilot_application(uuid);
 --   notify pgrst, 'reload schema';
 -- Organizations it created stay. They are ordinary rows; delete one only

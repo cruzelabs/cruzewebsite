@@ -27,16 +27,23 @@
 --
 -- The signed LOI must name the truck count the applicant typed. The policy
 -- "Users sign own LOI" (007) checked only user_id, so an applicant could tie
--- an LOI to anyone's application. It now also requires the application to be
--- the signer's own and, when that application has a truck_count, the LOI's
--- fleet_size to be that number. The site renders the LOI text from the same
--- value (src/pages/Apply.tsx).
+-- an LOI to anyone's application, or to none. It now requires:
+--   * an application, and the signer's own;
+--   * the LOI's fleet_size to equal that application's truck_count, or its
+--     fleet_size for an application from the old form (a size bucket);
+--   * when the application has a truck_count, the LOI text to contain the
+--     sentence "Fleet Integration: <count> vehicles shall be enrolled." as
+--     src/lib/loi.ts renders it. A change to that sentence needs a migration
+--     that changes this policy too (src/lib/loi.test.ts pins it).
+-- The text is still rendered in the browser, so the rest of it is what the
+-- signer's browser sent, as before.
 --
 -- Order: apply this file before the site with the new form is published (its
 -- insert names the new columns) and before notify-discord is redeployed (it
 -- reads them). The old site and the old function keep working with this file
 -- applied: the old form sends none of the new columns, so its rows have no
--- truck_count and its LOIs pass the policy as before.
+-- truck_count, and its LOI links the application it just made and repeats
+-- that application's size bucket, which the policy accepts.
 --
 -- Idempotent: safe to run more than once.
 -- Test: supabase/tests/026_application_fields.test.sql
@@ -103,21 +110,24 @@ grant insert (
 
 -- (4) An LOI ties only to the signer's own application and names its truck
 -- count. The outer columns are qualified because pilot_applications has a
--- fleet_size column too.
+-- fleet_size column too. A null pilot_application_id matches no row, so it
+-- is refused.
 drop policy if exists "Users sign own LOI" on public.loi_signatures;
 create policy "Users sign own LOI" on public.loi_signatures
   for insert
   with check (
     auth.uid() = user_id
-    and (
-      loi_signatures.pilot_application_id is null
-      or exists (
-        select 1
-        from public.pilot_applications p
-        where p.id = loi_signatures.pilot_application_id
-          and p.user_id = auth.uid()
-          and (p.truck_count is null or loi_signatures.fleet_size = p.truck_count::text)
-      )
+    and exists (
+      select 1
+      from public.pilot_applications p
+      where p.id = loi_signatures.pilot_application_id
+        and p.user_id = auth.uid()
+        and loi_signatures.fleet_size = coalesce(p.truck_count::text, p.fleet_size)
+        and (
+          p.truck_count is null
+          or strpos(loi_signatures.loi_full_text,
+                    'Fleet Integration: ' || p.truck_count::text || ' vehicles shall be enrolled.') > 0
+        )
     )
   );
 

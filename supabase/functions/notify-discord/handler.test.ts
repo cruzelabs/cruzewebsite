@@ -6,7 +6,16 @@
 // CI runs this in the "edge functions" job of .github/workflows/test.yml.
 
 import { assert, assertEquals } from "jsr:@std/assert@1.0.13";
-import { ADMIN_MESSAGES_URL, type Deps, handle, plain, type Row, slackText, type Table } from "./handler.ts";
+import {
+  ADMIN_MESSAGES_URL,
+  type Deps,
+  handle,
+  plain,
+  type Row,
+  SLACK_MAX_CHARS,
+  slackText,
+  type Table,
+} from "./handler.ts";
 
 const NOW = new Date("2026-10-18T12:00:00Z");
 const ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -343,6 +352,39 @@ Deno.test("a pilot post with every text field at its longest stays under Discord
     .join("").length;
   assert(total < 6000, `embed is ${total} characters`);
   for (const f of embed.fields) assert(f.value.length <= 1024, f.name);
+});
+
+Deno.test("the Slack copy keeps every field when each answer is as long as the form allows", async () => {
+  // The /apply inputs' maxLength: names 200, emails 320, provider name 200,
+  // tablet model 200, sites or lanes 1,000. Company and contact have no limit
+  // on the form, so they get the length of a long real name.
+  const row = pilotRow({
+    company_name: "C".repeat(200),
+    contact_name: "N".repeat(200),
+    contact_email: "e".repeat(310) + "@example.com",
+    fms_provider: "Other",
+    fms_other: "P".repeat(200),
+    primary_lanes: "L".repeat(1000),
+    data_authorizer_name: "A".repeat(200),
+    data_authorizer_email: "a".repeat(310) + "@example.com",
+    safety_contact_name: "S".repeat(200),
+    safety_contact_email: "s".repeat(310) + "@example.com",
+    tablet_model: "M".repeat(200),
+    tablet_count: 1000000,
+    tablet_management: "manual",
+    website: "https://" + "w".repeat(300) + ".example",
+  });
+  const d = fake({ env: { SLACK_WEBHOOK_URL: "https://slack.invalid/hook" }, rows: { pilot_applications: row } });
+  await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  const text: string = d.posts[0].body.text;
+  assert(text.length < SLACK_MAX_CHARS, `Slack text is ${text.length} characters`);
+  for (const label of [
+    "Company", "Trucks", "ELD or telematics", "Sites or lanes", "Truck class", "Contact", "Email",
+    "Authorizes data access", "Safety contact", "Tablets", "Website",
+  ]) {
+    assert(text.includes(`*${label}:* `), `Slack text lost ${label}`);
+  }
+  assert(text.endsWith("<https://cruzemaps.com/admin>"), "Slack text lost its admin link");
 });
 
 Deno.test("Discord failure is a 500 and does not echo Discord's reply", async () => {

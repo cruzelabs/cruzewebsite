@@ -149,14 +149,23 @@ describe("Apply", () => {
     expect(submitButton().hasAttribute("disabled")).toBe(true);
   });
 
-  it("keeps the button off without sites or lanes, and keeps digits only in the count", async () => {
+  it("keeps the button off without sites or lanes, and drops thousands separators from the count", async () => {
     await renderApply();
-    fillRequired("1,200 trucks");
+    fillRequired("1,200");
     expect((screen.getByLabelText("How many trucks? *") as HTMLInputElement).value).toBe("1200");
     type("Domicile sites or main lanes *", "  ");
     fireEvent.click(agree());
     expect(submitButton().hasAttribute("disabled")).toBe(true);
     expect(screen.getByText("Fill in the fields marked * and check I Agree.")).toBeTruthy();
+  });
+
+  it.each(["1.5", "-5", "1e3", "12 trucks"])("refuses %j as a truck count instead of rewriting it", async (typed) => {
+    await renderApply();
+    fillRequired(typed);
+    expect((screen.getByLabelText("How many trucks? *") as HTMLInputElement).value).toBe(typed.replace(/\s/g, ""));
+    expect(screen.getByText("Enter the number of trucks, 1 to 1,000,000.")).toBeTruthy();
+    fireEvent.click(agree());
+    expect(submitButton().hasAttribute("disabled")).toBe(true);
   });
 
   it("shows a typed optional email that is not valid", async () => {

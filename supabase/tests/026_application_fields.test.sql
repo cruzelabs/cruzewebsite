@@ -17,9 +17,10 @@
 --     count afterwards
 --   * out-of-range counts, an unknown tablet manager, over-long text and a
 --     fleet_size that differs from truck_count are rejected (23514)
---   * an LOI names its application's truck count and ties only to the
---     signer's own application (42501 otherwise); the old form's LOI and an
---     LOI with no application still go in
+--   * an LOI ties only to the signer's own application, carries its truck
+--     count (or the old form's size bucket) and, for a truck count, has the
+--     sentence that names it in its text; anything else is 42501, including
+--     an LOI with no application. The old form's LOI still goes in
 --
 -- Runs against a throwaway Postgres. Never run it against a real project.
 -- From the repo root:
@@ -404,13 +405,16 @@ select pg_temp.fails_as(format($q$insert into public.pilot_applications (user_id
   values (%L, 'Three Freight', 'pending', '0140', 140)$q$, :u3), 'authenticated', :u3, '23514');
 rollback;
 
--- (4) The LOI. u2 applies with the new form (140 trucks), then signs.
-create function pg_temp.loi_sql(p_user text, p_app text, p_fleet_size text) returns text language sql as $$
+-- (4) The LOI. u2 applies with the new form (140 trucks), then signs. The
+-- text holds the sentence src/lib/loi.ts renders, with p_text_count in it
+-- (the LOI's own fleet_size unless given).
+create function pg_temp.loi_sql(p_user text, p_app text, p_fleet_size text, p_text_count text default null)
+returns text language sql as $$
   select format($q$insert into public.loi_signatures
     (user_id, pilot_application_id, participant_name, participant_company, fleet_size, agreed, initials, loi_full_text)
     values (%L, %L, 'Dana', 'Two Freight', %L, true, 'D',
-            'Fleet Integration: ' || %L || ' vehicles shall be enrolled.')$q$,
-    p_user, p_app, p_fleet_size, p_fleet_size)
+            'LETTER OF INTENT' || chr(10) || 'Fleet Integration: ' || %L || ' vehicles shall be enrolled.' || chr(10) || 'Initials: D')$q$,
+    p_user, p_app, p_fleet_size, coalesce(p_text_count, p_fleet_size))
 $$;
 \set app2 '''40000000-0000-0000-0000-000000000002'''
 insert into public.pilot_applications (id, user_id, company_name, fleet_size, truck_count, primary_lanes,
@@ -429,6 +433,16 @@ rollback;
 begin;
 select pg_temp.fails_as(pg_temp.loi_sql(:u2, :app2, '141'), 'authenticated', :u2, '42501');
 rollback;
+-- The right fleet_size but a text that names another count, or none.
+begin;
+select pg_temp.fails_as(pg_temp.loi_sql(:u2, :app2, '140', '10'), 'authenticated', :u2, '42501');
+rollback;
+begin;
+select pg_temp.fails_as(format($q$insert into public.loi_signatures
+  (user_id, pilot_application_id, participant_name, participant_company, fleet_size, agreed, initials, loi_full_text)
+  values (%L, %L, 'Dana', 'Two Freight', '140', true, 'D', 'I agree to everything.')$q$, :u2, :app2),
+  'authenticated', :u2, '42501');
+rollback;
 -- Someone else's application, with or without a truck count.
 begin;
 select pg_temp.fails_as(pg_temp.loi_sql(:u3, :app2, '140'), 'authenticated', :u3, '42501');
@@ -443,15 +457,18 @@ rollback;
 begin;
 select pg_temp.fails_as(pg_temp.loi_sql(:u2, :app2, '140'), 'anon', null, '42501');
 rollback;
--- The old form: an application with a size bucket and no truck count.
+-- The old form: an application with a size bucket and no truck count. Its
+-- LOI repeats the bucket, as the live site's does.
 begin;
 select pg_temp.ok(pg_temp.exec_as(pg_temp.loi_sql(:u1, :app1, '101-500'), 'authenticated', :u1) = 1,
-  'the old form''s LOI, with a size bucket, still goes in');
+  'the old form''s LOI, with its application''s size bucket, still goes in');
 rollback;
--- An LOI with no application (no caller sends one today) behaves as before.
 begin;
-select pg_temp.ok(pg_temp.exec_as(pg_temp.loi_sql(:u3, null, '12'), 'authenticated', :u3) = 1,
-  'an LOI with no application still goes in');
+select pg_temp.fails_as(pg_temp.loi_sql(:u1, :app1, '501-1500'), 'authenticated', :u1, '42501');
+rollback;
+-- An LOI with no application: neither form sends one, so it is refused.
+begin;
+select pg_temp.fails_as(pg_temp.loi_sql(:u3, null, '12'), 'authenticated', :u3, '42501');
 rollback;
 
 \o

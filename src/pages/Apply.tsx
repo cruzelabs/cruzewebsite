@@ -126,7 +126,9 @@ function SectionTitle({ children }: { children: ReactNode }) {
   );
 }
 
-const digitsOnly = (value: string) => value.replace(/\D/g, "").slice(0, 7);
+// Thousands separators and spaces are dropped. Anything else stays, so "1.5"
+// shows an error instead of quietly becoming 15.
+const countInput = (value: string) => value.replace(/[,\s]/g, "");
 
 export default function Apply() {
   const navigate = useNavigate();
@@ -391,8 +393,9 @@ export default function Apply() {
                       id="apply-trucks"
                       inputMode="numeric"
                       autoComplete="off"
+                      maxLength={12}
                       value={data.truckCount}
-                      onChange={(e) => update("truckCount", digitsOnly(e.target.value))}
+                      onChange={(e) => update("truckCount", countInput(e.target.value))}
                       placeholder="e.g. 172"
                       className={INPUT_CLASS}
                     />
@@ -501,8 +504,9 @@ export default function Apply() {
                       id="apply-tablet-count"
                       inputMode="numeric"
                       autoComplete="off"
+                      maxLength={12}
                       value={data.tabletCount}
-                      onChange={(e) => update("tabletCount", digitsOnly(e.target.value))}
+                      onChange={(e) => update("tabletCount", countInput(e.target.value))}
                       placeholder="e.g. 170"
                       className={INPUT_CLASS}
                     />

@@ -247,12 +247,12 @@ function providerValue(row: Row): string {
   const provider = nonBlank(row.fms_provider);
   if (!provider) return "(not given)";
   const other = nonBlank(row.fms_other);
-  return fieldValue(other ? `${provider} (${other})` : provider, 250);
+  return fieldValue(other ? `${provider} (${other})` : provider, 150);
 }
 
 function personValue(name: unknown, email: unknown): string | null {
   const text = [nonBlank(name), nonBlank(email)].filter(Boolean).join(", ");
-  return text ? fieldValue(text, 600) : null;
+  return text ? fieldValue(text, 280) : null;
 }
 
 function tabletsValue(row: Row): string | null {
@@ -264,32 +264,33 @@ function tabletsValue(row: Row): string | null {
   if (model) parts.push(model);
   const manager = TABLET_MANAGERS.get(String(row.tablet_management));
   if (manager) parts.push(manager);
-  return parts.length ? fieldValue(parts.join(", "), 400) : null;
+  return parts.length ? fieldValue(parts.join(", "), 250) : null;
 }
 
 // Trucks, provider and sites always appear, so staff see at once what a pilot
-// still needs. Each value has its own cap, which keeps the embed under
-// Discord's 6,000 character total.
+// still needs. Each value has its own cap. Together they keep the embed under
+// Discord's 6,000 character total and a post with every answer at the form's
+// longest under SLACK_MAX_CHARS, so the Slack copy loses no field.
 export function pilotEmbed(row: Row): Row {
   const fields: Row[] = [
-    { name: "Company", value: row.company_name ? fieldValue(row.company_name, 200) : "(unspecified)", inline: true },
+    { name: "Company", value: row.company_name ? fieldValue(row.company_name, 150) : "(unspecified)", inline: true },
     { name: "Trucks", value: trucksValue(row), inline: true },
     { name: "ELD or telematics", value: providerValue(row), inline: true },
     {
       name: "Sites or lanes",
-      value: nonBlank(row.primary_lanes) ? fieldValue(row.primary_lanes, 500) : "(not given)",
+      value: nonBlank(row.primary_lanes) ? fieldValue(row.primary_lanes, 400) : "(not given)",
       inline: false,
     },
   ];
 
   if (row.truck_size) {
-    fields.push({ name: "Truck class", value: fieldValue(row.truck_size, 100), inline: true });
+    fields.push({ name: "Truck class", value: fieldValue(row.truck_size, 60), inline: true });
   }
   if (row.contact_name) {
-    fields.push({ name: "Contact", value: fieldValue(row.contact_name, 200), inline: true });
+    fields.push({ name: "Contact", value: fieldValue(row.contact_name, 120), inline: true });
   }
   if (row.contact_email) {
-    fields.push({ name: "Email", value: fieldValue(row.contact_email, 320), inline: true });
+    fields.push({ name: "Email", value: fieldValue(row.contact_email, 160), inline: true });
   }
   const access = personValue(row.data_authorizer_name, row.data_authorizer_email);
   if (access) fields.push({ name: "Authorizes data access", value: access, inline: false });
@@ -298,10 +299,10 @@ export function pilotEmbed(row: Row): Row {
   const tablets = tabletsValue(row);
   if (tablets) fields.push({ name: "Tablets", value: tablets, inline: false });
   if (row.website) {
-    fields.push({ name: "Website", value: fieldValue(row.website, 300), inline: false });
+    fields.push({ name: "Website", value: fieldValue(row.website, 200), inline: false });
   }
   if (row.notes) {
-    fields.push({ name: "Admin notes", value: fieldValue(row.notes, 500), inline: false });
+    fields.push({ name: "Admin notes", value: fieldValue(row.notes, 300), inline: false });
   }
 
   return message({

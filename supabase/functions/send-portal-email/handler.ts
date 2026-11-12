@@ -12,7 +12,10 @@ export const MAX_RECIPIENTS = 20;
 export const MAX_SUBJECT = 300;
 export const MAX_TEXT = 200_000;
 export const MAX_ATTACHMENTS = 10;
-export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+// The portal takes PDFs up to 25 MiB; Resend takes 40 MB per email after base64 (28 MiB decoded is about 37 MB).
+export const MAX_ATTACHMENT_BYTES = 28 * 1024 * 1024;
+/** Whole request, checked before the body is read. */
+export const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
 
 export interface Attachment {
   filename: string;
@@ -106,6 +109,9 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   const apiKey = deps.env("RESEND_API_KEY") ?? "";
   if (!apiKey) return json({ error: "not configured" }, 503);
 
+  const length = Number(req.headers.get("content-length") ?? "");
+  if (!Number.isFinite(length) || length > MAX_REQUEST_BYTES) return json({ error: "request too large" }, 413);
+
   let msg: Message;
   try {
     msg = parseMessage(await req.json());
@@ -124,10 +130,10 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
     email.attachments = msg.attachments.map((a) => ({ filename: a.filename, content: a.contentBase64, ...(a.mime ? { content_type: a.mime } : {}) }));
   }
   const r = await deps.sendEmail(apiKey, email);
-  if (!r.ok) {
-    // The provider's status only; its body can echo addresses, so it stays in the function log.
-    console.error("send-portal-email: provider refused", r.status, (r.text ?? "").slice(0, 300));
+  if (!r.ok || !r.id) {
+    // Status only: the provider's body can echo addresses or the message, so it is never logged or returned.
+    console.error("send-portal-email: provider refused or gave no id", r.status);
     return json({ error: "send failed", status: r.status }, 502);
   }
-  return json({ id: r.id ?? null });
+  return json({ id: r.id });
 }

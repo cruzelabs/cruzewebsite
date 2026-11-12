@@ -17,8 +17,10 @@ function deps(env: Record<string, string> = ENV) {
   return { d, sent };
 }
 
-const req = (body: unknown, headers: Record<string, string> = { "x-portal-email-secret": SECRET }, method = "POST") =>
-  new Request("https://x.supabase.co/functions/v1/send-portal-email", { method, headers: { "Content-Type": "application/json", ...headers }, body: method === "POST" ? JSON.stringify(body) : undefined });
+const req = (body: unknown, headers: Record<string, string> = { "x-portal-email-secret": SECRET }, method = "POST") => {
+  const raw = method === "POST" ? JSON.stringify(body) : undefined;
+  return new Request("https://x.supabase.co/functions/v1/send-portal-email", { method, headers: { "Content-Type": "application/json", ...(raw ? { "Content-Length": String(new TextEncoder().encode(raw).byteLength) } : {}), ...headers }, body: raw });
+};
 
 const ok = { to: ["owner@fleet.example"], subject: "Blue Mesa invited you to Cruze", text: "Accept: https://client.cruzemaps.com/invite/abc" };
 
@@ -90,4 +92,15 @@ Deno.test("base64Bytes", () => {
   assertEquals(base64Bytes("QUI="), 2);
   assertEquals(base64Bytes("QQ=="), 1);
   assertEquals(base64Bytes("abc"), -1);
+});
+
+Deno.test("a success without a message id counts as a failure", async () => {
+  const d: Deps = { ...deps().d, sendEmail: async () => ({ ok: true, status: 200 }) };
+  assertEquals((await handle(req(ok), d)).status, 502);
+});
+
+Deno.test("refuses a request over the size cap before reading it", async () => {
+  const { d, sent } = deps();
+  assertEquals((await handle(req(ok, { "x-portal-email-secret": SECRET, "Content-Length": String(41 * 1024 * 1024) }), d)).status, 413);
+  assertEquals(sent.length, 0);
 });

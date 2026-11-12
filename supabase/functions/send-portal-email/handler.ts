@@ -61,7 +61,8 @@ function addresses(v: unknown, field: string, required: boolean): string[] {
   if (required && out.length === 0) throw new Error(`${field} is required`);
   for (const a of out) {
     if (!EMAIL.test(a) || a.length > 254) throw new Error(`${field} has an invalid address`);
-    if (/\.invalid$/i.test(a)) throw new Error(`${field} has an undeliverable address`);
+    // Reserved example and test domains (RFC 2606, RFC 6761) never receive mail; sending would only bounce.
+    if (/(\.(example|test|localhost|invalid)|@example\.(com|net|org))$/i.test(a)) throw new Error(`${field} has an undeliverable address`);
   }
   return out;
 }

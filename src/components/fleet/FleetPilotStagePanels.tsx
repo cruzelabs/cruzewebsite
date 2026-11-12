@@ -15,7 +15,12 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import type { PilotApplicationRow, PilotLifecycleStatus } from "@/lib/pilotApplication";
+import {
+  applicationAnswers,
+  providerName,
+  type PilotApplicationRow,
+  type PilotLifecycleStatus,
+} from "@/lib/pilotApplication";
 import { PendingExploreSection } from "./PendingExploreSection";
 
 type LOISummary = { id: string; signed_at: string; participant_company: string };
@@ -66,9 +71,8 @@ function FleetMessageFromOps({ message }: { message: string }) {
 function ApplicationSummary({ app }: { app: PilotApplicationRow }) {
   const rows = [
     ["Company", app.company_name],
-    ["Fleet size", app.fleet_size],
     ["Truck class", app.truck_size],
-    ["FMS", app.fms_provider ? `${app.fms_provider}${app.fms_other ? ` (${app.fms_other})` : ""}` : null],
+    ...applicationAnswers(app),
   ].filter(([, v]) => v);
 
   if (rows.length === 0) return null;
@@ -83,7 +87,7 @@ function ApplicationSummary({ app }: { app: PilotApplicationRow }) {
           {rows.map(([label, value]) => (
             <div key={label}>
               <dt className="text-white/40 text-xs">{label}</dt>
-              <dd className="text-white/90 mt-0.5">{value}</dd>
+              <dd className="text-white/90 mt-0.5 break-words">{value}</dd>
             </div>
           ))}
         </dl>
@@ -97,8 +101,8 @@ export function FleetNoApplicationPanel() {
     <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="text-center max-w-lg mx-auto">
       <h1 className="text-3xl font-display font-bold mb-3">Start your Cruze pilot application</h1>
       <p className="text-white/60 mb-8">
-        Apply in five steps—including signing the LOI. We respond within two business days with a calibrated
-        30-day pilot proposal.
+        Apply on one short form and sign the LOI. We respond within two business days with a calibrated 30-day
+        pilot proposal.
       </p>
       <Button asChild className="bg-brand-orange text-[#0B0E14] hover:bg-brand-orange/90 font-bold">
         <Link to="/apply">Apply for the pilot</Link>
@@ -183,8 +187,8 @@ export function FleetPilotStageContent({
             {
               icon: Cable,
               title: "Prepare telematics access",
-              body: app?.fms_provider
-                ? `We'll integrate alongside ${app.fms_provider}. Have an admin contact ready for read-only API or export access.`
+              body: app && providerName(app)
+                ? `We'll integrate alongside ${providerName(app)}. Have an admin contact ready for read-only API or export access.`
                 : "Have your FMS admin contact ready for read-only telematics access.",
             },
           ]}
@@ -204,7 +208,7 @@ export function FleetPilotStageContent({
           title="Onboarding in progress"
           body="We're connecting to your fleet systems and preparing the 30-day pilot window. Your Cruze contact will confirm when drivers can go live."
         />
-        <OnboardingChecklist fms={app?.fms_provider} />
+        <OnboardingChecklist fms={app ? providerName(app) : null} />
       </motion.div>
     );
   }

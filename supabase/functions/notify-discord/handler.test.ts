@@ -83,10 +83,20 @@ const pilotRow = (over: Row = {}): Row => ({
   company_name: "Acme Freight",
   truck_size: "Class 8",
   fleet_size: "40",
+  truck_count: 40,
   notes: null,
   contact_name: "Dana Lee",
   contact_email: "dana@example.com",
   fms_provider: "Samsara",
+  fms_other: null,
+  primary_lanes: "Laredo yard; I-35 Laredo to Dallas",
+  data_authorizer_name: null,
+  data_authorizer_email: null,
+  safety_contact_name: null,
+  safety_contact_email: null,
+  tablet_model: null,
+  tablet_count: null,
+  tablet_management: null,
   website: "https://acme.example",
   created_at: minutesAgo(1),
   ...over,
@@ -246,7 +256,8 @@ Deno.test("pilot and LOI embeds keep their shape", async () => {
   const [pilot, loi] = d.posts.map((p) => p.body);
   assertEquals(pilot.embeds[0].title, "🚛 New pilot application");
   assertEquals(pilot.embeds[0].fields.map((f: Row) => f.name), [
-    "Company", "Fleet size", "Truck class", "Contact", "Email", "FMS", "Website", "Admin notes",
+    "Company", "Trucks", "ELD or telematics", "Sites or lanes", "Truck class", "Contact", "Email", "Website",
+    "Admin notes",
   ]);
   assertEquals(pilot.embeds[0].url, "https://cruzemaps.com/admin");
   assertEquals(loi.embeds[0].title, "✍️ LOI signed");
@@ -254,6 +265,84 @@ Deno.test("pilot and LOI embeds keep their shape", async () => {
   assertEquals(loi.embeds[0].url, `https://cruzemaps.com/loi/${ID}`);
   assertEquals(loi.embeds[0].fields.map((f: Row) => f.name), ["Participant", "Initials", "Company", "Fleet size", "Title"]);
   for (const p of [pilot, loi]) assertEquals(p.allowed_mentions, { parse: [] });
+});
+
+Deno.test("a pilot post carries every answer from the new form, in Discord and in Slack", async () => {
+  const row = pilotRow({
+    truck_size: null,
+    fleet_size: "1200",
+    truck_count: 1200,
+    fms_provider: "Other",
+    fms_other: "Fleet Complete",
+    data_authorizer_name: "Ira Ops",
+    data_authorizer_email: "ira@acme.example",
+    safety_contact_name: "Sam Safety",
+    safety_contact_email: "sam@acme.example",
+    tablet_model: "Galaxy Tab Active5",
+    tablet_count: 120,
+    tablet_management: "fleet_mdm",
+  });
+  const d = fake({ env: { ...ENV, SLACK_WEBHOOK_URL: "https://slack.invalid/hook" }, rows: { pilot_applications: row } });
+  const { body } = await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  assertEquals(body, { ok: true, table: "pilot_applications" });
+  const embed = d.posts[0].body.embeds[0];
+  const field = (name: string) => embed.fields.find((f: Row) => f.name === name)?.value;
+  assertEquals(field("Trucks"), "1,200");
+  assertEquals(field("ELD or telematics"), "Other \\(Fleet Complete\\)");
+  assertEquals(field("Sites or lanes"), "Laredo yard; I-35 Laredo to Dallas");
+  assertEquals(field("Authorizes data access"), "Ira Ops, ira@acme.example");
+  assertEquals(field("Safety contact"), "Sam Safety, sam@acme.example");
+  assertEquals(field("Tablets"), "120 tablets, Galaxy Tab Active5, managed through the fleet's MDM");
+  assertEquals(field("Truck class"), undefined);
+
+  const lines: string[] = d.posts[1].body.text.split("\n");
+  assert(lines.includes("*Trucks:* 1,200"));
+  assert(lines.includes("*ELD or telematics:* Other (Fleet Complete)"));
+  assert(lines.includes("*Sites or lanes:* Laredo yard; I-35 Laredo to Dallas"));
+  assert(lines.includes("*Tablets:* 120 tablets, Galaxy Tab Active5, managed through the fleet's MDM"));
+});
+
+Deno.test("a pilot post from the old form says what is missing", async () => {
+  const row = pilotRow({ fleet_size: "101-500", truck_count: null, fms_provider: null, primary_lanes: null });
+  const d = fake({ rows: { pilot_applications: row } });
+  await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  const fields: Row[] = d.posts[0].body.embeds[0].fields;
+  const field = (name: string) => fields.find((f) => f.name === name)?.value;
+  assertEquals(field("Trucks"), "101-500");
+  assertEquals(field("ELD or telematics"), "(not given)");
+  assertEquals(field("Sites or lanes"), "(not given)");
+  for (const name of ["Authorizes data access", "Safety contact", "Tablets"]) assertEquals(field(name), undefined);
+});
+
+Deno.test("a pilot post with every text field at its longest stays under Discord's 6,000 characters", async () => {
+  const long = (n: number) => "x".repeat(n);
+  const row = pilotRow({
+    company_name: long(5000),
+    fleet_size: long(5000),
+    truck_count: null,
+    truck_size: long(5000),
+    contact_name: long(5000),
+    contact_email: long(5000),
+    fms_provider: long(5000),
+    fms_other: long(5000),
+    primary_lanes: long(5000),
+    data_authorizer_name: long(5000),
+    data_authorizer_email: long(5000),
+    safety_contact_name: long(5000),
+    safety_contact_email: long(5000),
+    tablet_model: long(5000),
+    tablet_count: 1000000,
+    tablet_management: "cruze",
+    website: long(5000),
+    notes: long(5000),
+  });
+  const d = fake({ rows: { pilot_applications: row } });
+  await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  const embed = d.posts[0].body.embeds[0];
+  const total = [embed.title, embed.description, embed.footer.text, ...embed.fields.flatMap((f: Row) => [f.name, f.value])]
+    .join("").length;
+  assert(total < 6000, `embed is ${total} characters`);
+  for (const f of embed.fields) assert(f.value.length <= 1024, f.name);
 });
 
 Deno.test("Discord failure is a 500 and does not echo Discord's reply", async () => {

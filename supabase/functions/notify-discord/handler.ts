@@ -24,10 +24,15 @@
 export const TABLES = ["pilot_applications", "loi_signatures", "contact_messages"] as const;
 export type Table = (typeof TABLES)[number];
 
-// Columns read back for each table. Nothing else from the row is used.
+// Columns read back for each table. Nothing else from the row is used. The
+// pilot_applications list names columns from migration 026, so apply 026
+// before deploying this function.
 export const COLUMNS: Record<Table, string> = {
   pilot_applications:
-    "id, company_name, truck_size, fleet_size, notes, contact_name, contact_email, fms_provider, website, created_at",
+    "id, company_name, truck_size, fleet_size, truck_count, notes, contact_name, contact_email, " +
+    "fms_provider, fms_other, primary_lanes, data_authorizer_name, data_authorizer_email, " +
+    "safety_contact_name, safety_contact_email, tablet_model, tablet_count, tablet_management, " +
+    "website, created_at",
   loi_signatures:
     "id, participant_name, participant_company, participant_title, fleet_size, initials, signed_at, created_at",
   contact_messages: "id, name, email, organization, message, created_at",
@@ -221,27 +226,82 @@ function message(embed: Row): Row {
   };
 }
 
+const TABLET_MANAGERS = new Map<string, string>([
+  ["fleet_mdm", "managed through the fleet's MDM"],
+  ["cruze", "managed by Cruze"],
+  ["manual", "managed by hand"],
+]);
+
+function nonBlank(value: unknown): string | null {
+  const s = value == null ? "" : String(value).trim();
+  return s || null;
+}
+
+// The exact count from the new form, else the size bucket of an older row.
+function trucksValue(row: Row): string {
+  if (typeof row.truck_count === "number") return fieldValue(row.truck_count.toLocaleString("en-US"));
+  return nonBlank(row.fleet_size) ? fieldValue(row.fleet_size, 50) : "(not given)";
+}
+
+function providerValue(row: Row): string {
+  const provider = nonBlank(row.fms_provider);
+  if (!provider) return "(not given)";
+  const other = nonBlank(row.fms_other);
+  return fieldValue(other ? `${provider} (${other})` : provider, 250);
+}
+
+function personValue(name: unknown, email: unknown): string | null {
+  const text = [nonBlank(name), nonBlank(email)].filter(Boolean).join(", ");
+  return text ? fieldValue(text, 600) : null;
+}
+
+function tabletsValue(row: Row): string | null {
+  const parts: string[] = [];
+  if (typeof row.tablet_count === "number") {
+    parts.push(`${row.tablet_count.toLocaleString("en-US")} ${row.tablet_count === 1 ? "tablet" : "tablets"}`);
+  }
+  const model = nonBlank(row.tablet_model);
+  if (model) parts.push(model);
+  const manager = TABLET_MANAGERS.get(String(row.tablet_management));
+  if (manager) parts.push(manager);
+  return parts.length ? fieldValue(parts.join(", "), 400) : null;
+}
+
+// Trucks, provider and sites always appear, so staff see at once what a pilot
+// still needs. Each value has its own cap, which keeps the embed under
+// Discord's 6,000 character total.
 export function pilotEmbed(row: Row): Row {
-  const fields = [
-    { name: "Company", value: row.company_name ? fieldValue(row.company_name) : "(unspecified)", inline: true },
-    { name: "Fleet size", value: row.fleet_size ? fieldValue(row.fleet_size) : "(unspecified)", inline: true },
-    { name: "Truck class", value: row.truck_size ? fieldValue(row.truck_size) : "(unspecified)", inline: true },
+  const fields: Row[] = [
+    { name: "Company", value: row.company_name ? fieldValue(row.company_name, 200) : "(unspecified)", inline: true },
+    { name: "Trucks", value: trucksValue(row), inline: true },
+    { name: "ELD or telematics", value: providerValue(row), inline: true },
+    {
+      name: "Sites or lanes",
+      value: nonBlank(row.primary_lanes) ? fieldValue(row.primary_lanes, 500) : "(not given)",
+      inline: false,
+    },
   ];
 
+  if (row.truck_size) {
+    fields.push({ name: "Truck class", value: fieldValue(row.truck_size, 100), inline: true });
+  }
   if (row.contact_name) {
-    fields.push({ name: "Contact", value: fieldValue(row.contact_name), inline: true });
+    fields.push({ name: "Contact", value: fieldValue(row.contact_name, 200), inline: true });
   }
   if (row.contact_email) {
-    fields.push({ name: "Email", value: fieldValue(row.contact_email), inline: true });
+    fields.push({ name: "Email", value: fieldValue(row.contact_email, 320), inline: true });
   }
-  if (row.fms_provider) {
-    fields.push({ name: "FMS", value: fieldValue(row.fms_provider), inline: true });
-  }
+  const access = personValue(row.data_authorizer_name, row.data_authorizer_email);
+  if (access) fields.push({ name: "Authorizes data access", value: access, inline: false });
+  const safety = personValue(row.safety_contact_name, row.safety_contact_email);
+  if (safety) fields.push({ name: "Safety contact", value: safety, inline: false });
+  const tablets = tabletsValue(row);
+  if (tablets) fields.push({ name: "Tablets", value: tablets, inline: false });
   if (row.website) {
-    fields.push({ name: "Website", value: fieldValue(row.website), inline: false });
+    fields.push({ name: "Website", value: fieldValue(row.website, 300), inline: false });
   }
   if (row.notes) {
-    fields.push({ name: "Admin notes", value: fieldValue(row.notes), inline: false });
+    fields.push({ name: "Admin notes", value: fieldValue(row.notes, 500), inline: false });
   }
 
   return message({

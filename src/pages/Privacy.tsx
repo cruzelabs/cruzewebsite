@@ -67,16 +67,18 @@ export default function Privacy() {
         <H3>Pilot application</H3>
         <P>
           When you apply for a pilot at <Link to="/apply" className="underline" style={{ color: t.text }}>/apply</Link>,
-          we collect your name, company name, work email, phone number, and fleet size, and, where you
-          provide them, your company website, truck or vehicle details, primary lanes, your fleet
-          management system (FMS) provider, your job title, and any notes you add. We use this to review
-          your application, respond, and run the pilot.
+          we collect your name, company name, work email, phone number, number of trucks, ELD or
+          telematics provider, and domicile sites or lanes, and, where you provide them, the name and
+          email of the person who can authorize access to your ELD data and of a safety contact, the
+          model and number of your drivers' tablets and who manages them, your company website, truck or
+          vehicle details, your job title, and any notes you add. We use this to review your
+          application, respond, and run the pilot.
         </P>
 
         <H3>Letter of Intent and signing metadata</H3>
         <P>
           When you e-sign the pilot Letter of Intent (LOI), we record the LOI text, your name, company,
-          title, fleet size, email, your initials as your electronic signature, and the version and
+          title, number of trucks, email, your initials as your electronic signature, and the version and
           timestamp. To evidence the signature, we also record the IP address and browser user agent at
           the time of signing. See the{" "}
           <Link to="/terms" className="underline" style={{ color: t.text }}>

@@ -38,6 +38,14 @@ function makeApp(overrides: Partial<PilotApplicationRow> = {}): PilotApplication
     contact_phone: null,
     contact_title: null,
     application_notes: null,
+    truck_count: null,
+    data_authorizer_name: null,
+    data_authorizer_email: null,
+    tablet_model: null,
+    tablet_count: null,
+    tablet_management: null,
+    safety_contact_name: null,
+    safety_contact_email: null,
     fleet_visible_message: null,
     notes: null,
     created_at: "2026-01-01T00:00:00Z",
@@ -122,6 +130,38 @@ describe("FleetPilotStageContent — application summary", () => {
     expect(screen.getByText("Other (HomegrownTMS)")).toBeTruthy();
   });
 
+  it("shows every answer from the new form", () => {
+    renderStage(
+      "pending",
+      makeApp({
+        fleet_size: "1200",
+        truck_count: 1200,
+        fms_provider: "Omnitracs",
+        primary_lanes: "Laredo yard; I-35 Laredo to Dallas",
+        data_authorizer_name: "Ira Ops",
+        data_authorizer_email: "ira@acme.example",
+        safety_contact_name: "Sam Safety",
+        safety_contact_email: "sam@acme.example",
+        tablet_count: 120,
+        tablet_model: "Galaxy Tab Active5",
+        tablet_management: "fleet_mdm",
+      }),
+    );
+    const summary = screen.getByText("Your application").parentElement as HTMLElement;
+    const value = (label: string) => within(summary).getByText(label).nextElementSibling?.textContent;
+    expect(value("Trucks")).toBe("1,200");
+    expect(value("ELD or telematics")).toBe("Omnitracs");
+    expect(value("Sites or lanes")).toBe("Laredo yard; I-35 Laredo to Dallas");
+    expect(value("Authorizes data access")).toBe("Ira Ops, ira@acme.example");
+    expect(value("Safety contact")).toBe("Sam Safety, sam@acme.example");
+    expect(value("Tablets")).toBe("120 tablets, Galaxy Tab Active5, managed through the fleet's MDM");
+  });
+
+  it("names the typed provider, not 'Other', in the approved panel", () => {
+    renderStage("approved", makeApp({ status: "approved", fms_provider: "Other", fms_other: "Fleet Complete" }));
+    expect(screen.getByText(/We'll integrate alongside Fleet Complete\./)).toBeTruthy();
+  });
+
   it("collapses the summary to nothing when every field is empty", () => {
     // ApplicationSummary returns null when rows.length === 0 after filtering
     // falsy values — so a blank app must not render an empty 'Your application'.
@@ -150,6 +190,12 @@ describe("FleetPilotStageContent — branch-specific details", () => {
   it("uses the generic telematics step when no FMS provider is known", () => {
     renderStage("onboarding", makeApp({ status: "onboarding", fms_provider: null }));
     expect(screen.getByText(/Telematics \/ FMS read access provisioned/i)).toBeTruthy();
+  });
+
+  it("uses the generic telematics step when the fleet has no provider", () => {
+    renderStage("onboarding", makeApp({ status: "onboarding", fms_provider: "None" }));
+    expect(screen.getByText(/Telematics \/ FMS read access provisioned/i)).toBeTruthy();
+    expect(screen.queryByText(/Read-only None access/i)).toBeNull();
   });
 
   it("shows the contact email in the pending confirmation when present", () => {

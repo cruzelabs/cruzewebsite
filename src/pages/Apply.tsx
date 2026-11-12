@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import MarketingLayout from "@/components/marketing/MarketingLayout";
 import SEO from "@/components/SEO";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -31,7 +32,16 @@ import {
   renderLOIText,
   suggestInitials,
 } from "@/lib/loi";
-import { pilotInsertFromWizard, TERMINAL_PILOT_STATUSES } from "@/lib/pilotApplication";
+import {
+  blankWizard,
+  ELD_PROVIDERS,
+  parseCount,
+  pilotInsertFromWizard,
+  TABLET_MANAGER_CHOICES,
+  TERMINAL_PILOT_STATUSES,
+  wizardErrors,
+  type ApplyWizardPayload,
+} from "@/lib/pilotApplication";
 import {
   clearAllDrafts,
   loadWizardDraft,
@@ -45,13 +55,13 @@ type WizardData = WizardDraft;
 const APPLY_PROCESS_FEATURES = [
   {
     icon: Timer,
-    title: "30-Second Setup",
-    body: "Complete your entire application on one short screen.",
+    title: "Two-Minute Setup",
+    body: "Complete your whole application on one short screen.",
   },
   {
     icon: FormInput,
     title: "One-Page Form",
-    body: "Just your name, company, email, phone, and fleet size.",
+    body: "Your contact details, truck count, ELD provider and sites. The rest is optional.",
   },
   {
     icon: PenLine,
@@ -74,22 +84,49 @@ function isNonEmpty(value: string | undefined): boolean {
   return !!value?.trim();
 }
 
-function isValidEmail(value: string | undefined): boolean {
-  const email = value?.trim() ?? "";
-  // Practical check — HTML type=email is UX only; submit must not accept "a@b".
-  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+function formValid(data: WizardData): boolean {
+  return Object.keys(wizardErrors(data)).length === 0 && !!data.loiAgreed;
 }
 
-function formValid(data: WizardData): boolean {
+// Editing these after checking I Agree clears the box: the signed text would
+// no longer match what they agreed to.
+const LOI_MATERIAL: (keyof WizardData)[] = ["contactName", "companyName", "truckCount"];
+
+const INPUT_CLASS = "bg-white/5 border-white/10 text-white";
+
+function Field({
+  id,
+  label,
+  error,
+  children,
+}: {
+  id: string;
+  label: string;
+  error?: string;
+  children: ReactNode;
+}) {
   return (
-    isNonEmpty(data.contactName) &&
-    isNonEmpty(data.companyName) &&
-    isValidEmail(data.contactEmail) &&
-    isNonEmpty(data.contactPhone) &&
-    isNonEmpty(data.fleetSize) &&
-    !!data.loiAgreed
+    <div>
+      <Label htmlFor={id} className="text-white/70 text-sm mb-1 block">
+        {label}
+      </Label>
+      {children}
+      {error && (
+        <p id={`${id}-error`} className="text-xs text-red-400 mt-1">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
+
+function SectionTitle({ children }: { children: ReactNode }) {
+  return (
+    <div className="pt-2 text-[11px] uppercase tracking-widest text-white/45 font-semibold">{children}</div>
+  );
+}
+
+const digitsOnly = (value: string) => value.replace(/\D/g, "").slice(0, 7);
 
 export default function Apply() {
   const navigate = useNavigate();
@@ -101,18 +138,7 @@ export default function Apply() {
   const startedRef = useRef(false);
 
   const [data, setData] = useState<WizardData>({
-    companyName: "",
-    website: "",
-    fleetSize: "",
-    truckSize: "",
-    primaryLanes: "",
-    fmsProvider: "",
-    fmsOther: "",
-    contactEmail: user?.email || "",
-    contactName: "",
-    contactPhone: "",
-    contactTitle: "",
-    notes: "",
+    ...blankWizard(user?.email || ""),
     loiAgreed: false,
     loiInitials: "",
   });
@@ -144,20 +170,22 @@ export default function Apply() {
   const update = <K extends keyof WizardData>(key: K, value: WizardData[K]) => {
     if (!startedRef.current) {
       startedRef.current = true;
-      track("application_started", { fleet_size: data.fleetSize });
+      track("application_started");
     }
     setData((prev) => {
       let next: WizardData = { ...prev, [key]: value };
-      // Editing LOI-material fields invalidates a prior agree — the signed
-      // text would no longer match what they checked.
-      const loiMaterial: (keyof WizardData)[] = ["contactName", "companyName", "fleetSize"];
-      if (loiMaterial.includes(key) && prev.loiAgreed) {
+      if (LOI_MATERIAL.includes(key) && prev.loiAgreed && prev[key] !== value) {
         next = { ...next, loiAgreed: false };
       }
       scheduleDraftPersist(user?.id, next);
       return next;
     });
   };
+
+  const errors = useMemo(() => wizardErrors(data), [data]);
+  // Show a field's problem once something is typed in it; an empty required
+  // field is marked with * and the note under the button.
+  const shownError = (key: keyof ApplyWizardPayload) => (isNonEmpty(data[key]) ? errors[key] : undefined);
 
   const signedDate = useMemo(
     () => new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
@@ -166,21 +194,25 @@ export default function Apply() {
 
   const initials = useMemo(() => suggestInitials(data.contactName) || "—", [data.contactName]);
 
+  // The exact count as the LOI and the database hold it: digits, no commas.
+  const truckCount = parseCount(data.truckCount, 1);
+  const trucksForLOI = truckCount === null ? null : String(truckCount);
+
   const fullLOIText = useMemo(
     () =>
       renderLOIText({
         participantName: data.contactName.trim() || "[your name]",
         participantCompany: data.companyName.trim() || "[your company]",
-        fleetSize: data.fleetSize || "[fleet size]",
+        fleetSize: trucksForLOI ?? "[number of trucks]",
         signedDate,
         initials,
       }),
-    [data.contactName, data.companyName, data.fleetSize, signedDate, initials]
+    [data.contactName, data.companyName, trucksForLOI, signedDate, initials]
   );
 
   const submit = async () => {
-    if (!formValid(data)) {
-      toast.error("Please fill every field and check the agreement box.");
+    if (!formValid(data) || trucksForLOI === null) {
+      toast.error("Fill in the fields marked * and check I Agree.");
       return;
     }
     setSubmitting(true);
@@ -232,10 +264,12 @@ export default function Apply() {
     const contactName = data.contactName.trim();
     const companyName = data.companyName.trim();
     const signedInitials = suggestInitials(contactName);
+    // Names the truck count the applicant typed; the database refuses an LOI
+    // whose fleet_size differs from its application's truck_count (026).
     const loiFullText = renderLOIText({
       participantName: contactName,
       participantCompany: companyName,
-      fleetSize: data.fleetSize,
+      fleetSize: trucksForLOI,
       signedDate,
       initials: signedInitials,
     });
@@ -249,7 +283,7 @@ export default function Apply() {
         participant_company: companyName,
         participant_title: null,
         contact_email: data.contactEmail.trim(),
-        fleet_size: data.fleetSize,
+        fleet_size: trucksForLOI,
         agreed: true,
         initials: signedInitials,
         loi_version: LOI_VERSION,
@@ -288,7 +322,7 @@ export default function Apply() {
     await clearAllDrafts();
 
     setSubmitting(false);
-    track("application_submitted", { fleet_size: data.fleetSize, fms: data.fmsProvider, loi_signed: true });
+    track("application_submitted", { truck_count: truckCount, fms: data.fmsProvider, loi_signed: true });
     setDone(true);
     submitTimerRef.current = setTimeout(() => navigate("/fleet-dashboard"), 1800);
   };
@@ -301,68 +335,193 @@ export default function Apply() {
           <>
             <h1 className="font-display text-3xl md:text-5xl font-bold mb-2">Apply for the Cruze pilot.</h1>
             <p className="text-white/60 mb-8">
-              One short form, done in 30 seconds. Check I Agree to e-sign your non-binding LOI. We'll respond within
+              One short form, about two minutes. Check I Agree to e-sign your non-binding LOI. We'll respond within
               two business days with a calibrated 30-day pilot proposal.
             </p>
 
             <Card className="bg-[#0F131C] border-white/10">
               <CardContent className="p-8 space-y-5">
                 <div className="grid md:grid-cols-2 gap-4">
-                  <div>
-                    <Label className="text-white/70 text-sm mb-1 block">Your name *</Label>
+                  <Field id="apply-name" label="Your name *">
                     <Input
+                      id="apply-name"
                       value={data.contactName}
                       onChange={(e) => update("contactName", e.target.value)}
                       placeholder="Full name (used on your LOI)"
-                      className="bg-white/5 border-white/10 text-white"
+                      className={INPUT_CLASS}
                     />
-                  </div>
-                  <div>
-                    <Label className="text-white/70 text-sm mb-1 block">Company name *</Label>
+                  </Field>
+                  <Field id="apply-company" label="Company name *">
                     <Input
+                      id="apply-company"
                       value={data.companyName}
                       onChange={(e) => update("companyName", e.target.value)}
                       placeholder="Swift Transport Logistics"
-                      className="bg-white/5 border-white/10 text-white"
+                      className={INPUT_CLASS}
                     />
-                  </div>
+                  </Field>
                 </div>
                 <div className="grid md:grid-cols-2 gap-4">
-                  <div>
-                    <Label className="text-white/70 text-sm mb-1 block">Work email *</Label>
+                  <Field id="apply-email" label="Work email *" error={shownError("contactEmail")}>
                     <Input
+                      id="apply-email"
                       type="email"
                       value={data.contactEmail}
                       onChange={(e) => update("contactEmail", e.target.value)}
                       placeholder="you@company.com"
-                      className="bg-white/5 border-white/10 text-white"
+                      className={INPUT_CLASS}
                     />
-                  </div>
-                  <div>
-                    <Label className="text-white/70 text-sm mb-1 block">Phone *</Label>
+                  </Field>
+                  <Field id="apply-phone" label="Phone *">
                     <Input
+                      id="apply-phone"
                       type="tel"
                       value={data.contactPhone}
                       onChange={(e) => update("contactPhone", e.target.value)}
                       placeholder="(210) 555-0100"
-                      className="bg-white/5 border-white/10 text-white"
+                      className={INPUT_CLASS}
                     />
-                  </div>
+                  </Field>
                 </div>
-                <div>
-                  <Label className="text-white/70 text-sm mb-1 block">How many trucks? *</Label>
-                  <Select value={data.fleetSize} onValueChange={(v) => update("fleetSize", v)}>
-                    <SelectTrigger className="bg-white/5 border-white/10 text-white">
-                      <SelectValue placeholder="Fleet size" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="1-25">1–25 trucks</SelectItem>
-                      <SelectItem value="26-100">26–100 trucks</SelectItem>
-                      <SelectItem value="101-500">101–500 trucks</SelectItem>
-                      <SelectItem value="501-1500">501–1,500 trucks</SelectItem>
-                      <SelectItem value="1500+">1,500+ trucks</SelectItem>
-                    </SelectContent>
-                  </Select>
+
+                <SectionTitle>Your fleet</SectionTitle>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <Field id="apply-trucks" label="How many trucks? *" error={shownError("truckCount")}>
+                    <Input
+                      id="apply-trucks"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={data.truckCount}
+                      onChange={(e) => update("truckCount", digitsOnly(e.target.value))}
+                      placeholder="e.g. 172"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                  <Field id="apply-provider" label="ELD or telematics provider *">
+                    <Select value={data.fmsProvider} onValueChange={(v) => update("fmsProvider", v)}>
+                      <SelectTrigger id="apply-provider" className={INPUT_CLASS}>
+                        <SelectValue placeholder="Choose one" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {ELD_PROVIDERS.map((p) => (
+                          <SelectItem key={p} value={p}>
+                            {p}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                </div>
+                {data.fmsProvider === "Other" && (
+                  <Field id="apply-provider-other" label="Which provider? *">
+                    <Input
+                      id="apply-provider-other"
+                      value={data.fmsOther}
+                      maxLength={200}
+                      onChange={(e) => update("fmsOther", e.target.value)}
+                      placeholder="e.g. Fleet Complete"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                )}
+                <Field id="apply-sites" label="Domicile sites or main lanes *">
+                  <Textarea
+                    id="apply-sites"
+                    rows={2}
+                    maxLength={1000}
+                    value={data.primaryLanes}
+                    onChange={(e) => update("primaryLanes", e.target.value)}
+                    placeholder="e.g. Laredo yard; I-35 Laredo to Dallas"
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+
+                <SectionTitle>People (optional)</SectionTitle>
+                <div className="grid md:grid-cols-2 gap-4 items-end">
+                  <Field id="apply-access-name" label="Who can authorize access to your ELD data?">
+                    <Input
+                      id="apply-access-name"
+                      value={data.dataAuthorizerName}
+                      maxLength={200}
+                      onChange={(e) => update("dataAuthorizerName", e.target.value)}
+                      placeholder="Name"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                  <Field id="apply-access-email" label="Their email" error={shownError("dataAuthorizerEmail")}>
+                    <Input
+                      id="apply-access-email"
+                      type="email"
+                      value={data.dataAuthorizerEmail}
+                      maxLength={320}
+                      onChange={(e) => update("dataAuthorizerEmail", e.target.value)}
+                      placeholder="name@company.com"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                </div>
+                <div className="grid md:grid-cols-2 gap-4">
+                  <Field id="apply-safety-name" label="Safety contact">
+                    <Input
+                      id="apply-safety-name"
+                      value={data.safetyContactName}
+                      maxLength={200}
+                      onChange={(e) => update("safetyContactName", e.target.value)}
+                      placeholder="Name"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                  <Field id="apply-safety-email" label="Their email" error={shownError("safetyContactEmail")}>
+                    <Input
+                      id="apply-safety-email"
+                      type="email"
+                      value={data.safetyContactEmail}
+                      maxLength={320}
+                      onChange={(e) => update("safetyContactEmail", e.target.value)}
+                      placeholder="name@company.com"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                </div>
+
+                <SectionTitle>Driver tablets (optional)</SectionTitle>
+                <div className="grid md:grid-cols-3 gap-4">
+                  <Field id="apply-tablet-model" label="Model">
+                    <Input
+                      id="apply-tablet-model"
+                      value={data.tabletModel}
+                      maxLength={200}
+                      onChange={(e) => update("tabletModel", e.target.value)}
+                      placeholder="e.g. Galaxy Tab Active5"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                  <Field id="apply-tablet-count" label="How many?" error={shownError("tabletCount")}>
+                    <Input
+                      id="apply-tablet-count"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={data.tabletCount}
+                      onChange={(e) => update("tabletCount", digitsOnly(e.target.value))}
+                      placeholder="e.g. 170"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                  <Field id="apply-tablet-manager" label="Who manages them?">
+                    <Select value={data.tabletManagement} onValueChange={(v) => update("tabletManagement", v)}>
+                      <SelectTrigger id="apply-tablet-manager" className={INPUT_CLASS}>
+                        <SelectValue placeholder="Choose one" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Object.entries(TABLET_MANAGER_CHOICES).map(([value, label]) => (
+                          <SelectItem key={value} value={value}>
+                            {label}
+                          </SelectItem>
+                        ))}
+                        <SelectItem value="unsure">Not sure yet</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
                 </div>
 
                 {/* LOI agreement */}
@@ -403,7 +562,14 @@ export default function Apply() {
                     <span className="text-sm text-white/85 leading-relaxed">
                       <span className="font-semibold text-white">I Agree</span>
                       {" "}— I accept the Letter of Intent and terms above on behalf of{" "}
-                      <span className="text-brand-cyan">{data.companyName.trim() || "my company"}</span>. This is a
+                      <span className="text-brand-cyan">{data.companyName.trim() || "my company"}</span>
+                      {trucksForLOI && (
+                        <>
+                          {" "}for <span className="text-brand-cyan">{truckCount.toLocaleString("en-US")}</span>{" "}
+                          {truckCount === 1 ? "truck" : "trucks"}
+                        </>
+                      )}
+                      . This is a
                       30-day <span className="font-semibold text-white">non-binding</span> pilot with a{" "}
                       {PERFORMANCE_FEE_MIN_PCT}–{PERFORMANCE_FEE_MAX_PCT}% performance fee only on documented savings.
                       My initials ({initials}) are applied as my electronic signature, timestamped {signedDate}.
@@ -438,6 +604,9 @@ export default function Apply() {
                   {submitting && <Loader2 className="animate-spin mr-2" size={16} />}
                   Sign &amp; submit
                 </Button>
+                {!formValid(data) && (
+                  <p className="text-xs text-white/50 text-center">Fill in the fields marked * and check I Agree.</p>
+                )}
                 <p className="text-xs text-white/40 text-center">
                   No printing, no scanning. A copy of your signed LOI is available from your dashboard.
                 </p>
@@ -457,7 +626,7 @@ export default function Apply() {
             {/* Why it's fast + pilot context, below the form */}
             <div className="mt-8 rounded-xl border border-brand-cyan/20 bg-brand-cyan/5 p-5">
               <div className="text-[11px] uppercase tracking-widest text-brand-cyan font-semibold mb-4">
-                Why applying takes under a minute
+                Why applying is quick
               </div>
               <ul className="space-y-3.5">
                 {APPLY_PROCESS_FEATURES.map((feature) => {

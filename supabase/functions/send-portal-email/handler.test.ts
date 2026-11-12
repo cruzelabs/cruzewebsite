@@ -22,7 +22,7 @@ const req = (body: unknown, headers: Record<string, string> = { "x-portal-email-
   return new Request("https://x.supabase.co/functions/v1/send-portal-email", { method, headers: { "Content-Type": "application/json", ...(raw ? { "Content-Length": String(new TextEncoder().encode(raw).byteLength) } : {}), ...headers }, body: raw });
 };
 
-const ok = { to: ["owner@fleet.example"], subject: "Blue Mesa invited you to Cruze", text: "Accept: https://client.cruzemaps.com/invite/abc" };
+const ok = { to: ["owner@fleet.com"], subject: "Blue Mesa invited you to Cruze", text: "Accept: https://client.cruzemaps.com/invite/abc" };
 
 Deno.test("sends with the fixed sender and returns the provider id", async () => {
   const { d, sent } = deps();
@@ -31,7 +31,7 @@ Deno.test("sends with the fixed sender and returns the provider id", async () =>
   assertEquals((await r.json()).id, "msg_1");
   assertEquals(sent.length, 1);
   assertEquals(sent[0].from, DEFAULT_FROM);
-  assertEquals(sent[0].to, ["owner@fleet.example"]);
+  assertEquals(sent[0].to, ["owner@fleet.com"]);
   assertEquals(sent[0].cc, undefined);
 });
 
@@ -59,7 +59,7 @@ Deno.test("is closed without the Resend key", async () => {
 });
 
 Deno.test("a provider refusal is a 502 with its status only", async () => {
-  const d: Deps = { ...deps().d, sendEmail: async () => ({ ok: false, status: 403, text: "domain not verified for owner@fleet.example" }) };
+  const d: Deps = { ...deps().d, sendEmail: async () => ({ ok: false, status: 403, text: "domain not verified for owner@fleet.com" }) };
   const r = await handle(req(ok), d);
   assertEquals(r.status, 502);
   assertEquals(await r.json(), { error: "send failed", status: 403 });
@@ -69,15 +69,17 @@ Deno.test("checks recipients, subject, text and attachments", () => {
   assertThrows(() => parseMessage({ ...ok, to: [] }));
   assertThrows(() => parseMessage({ ...ok, to: ["not an address"] }));
   assertThrows(() => parseMessage({ ...ok, to: ["x@website-users.cruzemaps.invalid"] }));
-  assertThrows(() => parseMessage({ ...ok, to: Array.from({ length: 21 }, (_, i) => `a${i}@x.example`) }));
+  assertThrows(() => parseMessage({ ...ok, to: ["ops@bluemesa.example"] }));
+  assertThrows(() => parseMessage({ ...ok, cc: ["a@example.com"] }));
+  assertThrows(() => parseMessage({ ...ok, to: Array.from({ length: 21 }, (_, i) => `a${i}@x.com`) }));
   assertThrows(() => parseMessage({ ...ok, subject: "Hi\r\nBcc: x@y.example" }));
   assertThrows(() => parseMessage({ ...ok, subject: "" }));
   assertThrows(() => parseMessage({ ...ok, text: "" }));
   assertThrows(() => parseMessage({ ...ok, attachments: [{ filename: "../x.pdf", contentBase64: "QUJD" }] }));
   assertThrows(() => parseMessage({ ...ok, attachments: [{ filename: "x.pdf", contentBase64: "not base64!" }] }));
   assertThrows(() => parseMessage({ ...ok, attachments: [{ filename: "x.pdf", contentBase64: "QUJD", mime: "text/html; x" }] }));
-  const m = parseMessage({ ...ok, cc: ["ops@fleet.example"], attachments: [{ filename: "rate-confirmation-L1.pdf", contentBase64: "QUJD", mime: "application/pdf" }] });
-  assertEquals(m.cc, ["ops@fleet.example"]);
+  const m = parseMessage({ ...ok, cc: ["ops@fleet.com"], attachments: [{ filename: "rate-confirmation-L1.pdf", contentBase64: "QUJD", mime: "application/pdf" }] });
+  assertEquals(m.cc, ["ops@fleet.com"]);
   assertEquals(m.attachments.length, 1);
 });
 

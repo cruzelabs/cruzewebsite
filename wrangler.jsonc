@@ -3,6 +3,8 @@
   "name": "cruzewebsite",
   "compatibility_date": "2026-04-17",
   "compatibility_flags": ["nodejs_compat"],
+  // Served only on cruzemaps.com: no public copy on workers.dev.
+  "workers_dev": false,
   "assets": {
     "directory": "dist",
     "html_handling": "drop-trailing-slash",

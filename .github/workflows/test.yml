@@ -187,3 +187,6 @@ jobs:
 
       - name: capture-loi-metadata
         run: deno test --no-lock supabase/functions/capture-loi-metadata/
+
+      - name: send-portal-email
+        run: deno test --no-lock supabase/functions/send-portal-email/

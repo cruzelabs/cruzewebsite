@@ -12,6 +12,7 @@ import {
   handle,
   plain,
   type Row,
+  shareBudget,
   SLACK_MAX_CHARS,
   slackText,
   type Table,
@@ -385,6 +386,44 @@ Deno.test("the Slack copy keeps every field when each answer is as long as the f
     assert(text.includes(`*${label}:* `), `Slack text lost ${label}`);
   }
   assert(text.endsWith("<https://cruzemaps.com/admin>"), "Slack text lost its admin link");
+});
+
+Deno.test("the Slack copy keeps every field even when escaping for Slack makes the answers longer", async () => {
+  // Every & becomes &amp; for Slack, five times its length.
+  const amps = (n: number) => "&".repeat(n);
+  const row = pilotRow({
+    company_name: amps(200),
+    contact_name: amps(200),
+    contact_email: amps(320),
+    fms_provider: "Other",
+    fms_other: amps(200),
+    primary_lanes: amps(1000),
+    data_authorizer_name: amps(200),
+    data_authorizer_email: amps(320),
+    safety_contact_name: amps(200),
+    safety_contact_email: amps(320),
+    tablet_model: amps(200),
+    tablet_count: 12,
+    website: amps(300),
+  });
+  const d = fake({ env: { SLACK_WEBHOOK_URL: "https://slack.invalid/hook" }, rows: { pilot_applications: row } });
+  await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  const text: string = d.posts[0].body.text;
+  assert(text.length <= SLACK_MAX_CHARS, `Slack text is ${text.length} characters`);
+  for (const label of [
+    "Company", "Trucks", "ELD or telematics", "Sites or lanes", "Truck class", "Contact", "Email",
+    "Authorizes data access", "Safety contact", "Tablets", "Website",
+  ]) {
+    assert(text.includes(`*${label}:* `), `Slack text lost ${label}`);
+  }
+  assert(text.endsWith("<https://cruzemaps.com/admin>"), "Slack text lost its admin link");
+  // No entity is cut in half.
+  assert(!/&(a|am|amp|l|lt|g|gt)?…/.test(text), "an entity was cut");
+});
+
+Deno.test("shareBudget keeps short values whole and shares the rest", () => {
+  assertEquals(shareBudget(["aa", "bbbbbbbbbb", "cccccccccc"], 12), ["aa", "bbbb…", "cccc…"]);
+  assertEquals(shareBudget(["a", "b"], 10), ["a", "b"]);
 });
 
 Deno.test("Discord failure is a 500 and does not echo Discord's reply", async () => {

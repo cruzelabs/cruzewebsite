@@ -187,14 +187,52 @@ export function plain(value: unknown): string {
 }
 
 // The same notice as a Slack incoming-webhook message. It is built from the
-// Discord body so the two cannot drift apart.
+// Discord body so the two cannot drift apart. Escaping for Slack can make a
+// value longer (& becomes &amp;), so when the whole text would pass
+// SLACK_MAX_CHARS the longest values are shortened, and every field and the
+// link still arrive. The final slice is only a backstop.
 export function slackMessage(discord: Row): Row {
   const embed = discord.embeds[0];
   const fields: Row[] = embed.fields ?? [];
-  const lines = [`*${slackText(embed.title)}*`, slackText(embed.description)];
-  for (const f of fields) lines.push(`*${f.name}:* ${slackText(f.value)}`);
-  if (embed.url && !fields.some((f) => f.value === embed.url)) lines.push(`<${embed.url}>`);
+  const head = [`*${slackText(embed.title)}*`, slackText(embed.description)];
+  const labels = fields.map((f) => `*${f.name}:* `);
+  const tail = embed.url && !fields.some((f) => f.value === embed.url) ? [`<${embed.url}>`] : [];
+  let values = fields.map((f) => slackText(f.value));
+  const fixed =
+    [...head, ...tail].join("").length + labels.join("").length + head.length + fields.length + tail.length - 1;
+  if (fixed + values.join("").length > SLACK_MAX_CHARS) values = shareBudget(values, SLACK_MAX_CHARS - fixed);
+  const lines = [...head, ...fields.map((_, i) => labels[i] + values[i]), ...tail];
   return { text: lines.join("\n").slice(0, SLACK_MAX_CHARS) };
+}
+
+// Shortens the longest values until all of them fit in `budget` characters:
+// short values stay whole, the long ones share what is left equally.
+export function shareBudget(values: string[], budget: number): string[] {
+  let open = values.map((_, i) => i);
+  let left = Math.max(budget, 0);
+  for (;;) {
+    const share = open.length ? Math.floor(left / open.length) : 0;
+    const fits = open.filter((i) => values[i].length <= share);
+    if (fits.length === 0) {
+      return values.map((v, i) => (open.includes(i) ? cutSlack(v, share) : v));
+    }
+    for (const i of fits) left -= values[i].length;
+    open = open.filter((i) => !fits.includes(i));
+  }
+}
+
+// Cuts Slack text to `max` characters with a trailing "…", never inside an
+// &amp; &lt; or &gt; entity. After slackText every & starts one of those.
+function cutSlack(text: string, max: number): string {
+  if (text.length <= max) return text;
+  if (max <= 1) return "…";
+  let cut = text.slice(0, max - 1);
+  const amp = cut.lastIndexOf("&");
+  if (amp !== -1) {
+    const entity = text.startsWith("&amp;", amp) ? 5 : 4;
+    if (amp + entity > cut.length) cut = cut.slice(0, amp);
+  }
+  return cut + "…";
 }
 
 // Discord-escaped text as Slack text: our own **bold** becomes *bold*, the

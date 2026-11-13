@@ -7,8 +7,9 @@
 //
 // The payload is not trusted beyond type, table and record.id: the row is read
 // back from the database with the service role and the email is built from
-// that. Each application gets at most one email per status. Rules live in
-// handler.ts; tests in handler.test.ts; the email copy in template.ts.
+// that. Each application gets at most one email per status. An email names a
+// signed LOI only when loi_signatures has one for the application. Rules live
+// in handler.ts; tests in handler.test.ts; the email copy in template.ts.
 //
 // Secrets (Supabase dashboard, Edge Function Secrets):
 //   - RESEND_API_KEY        (without it the function sends nothing)
@@ -62,6 +63,20 @@ serve((req) =>
       if (error.code === "23505") return "duplicate";
       console.error(`send-pilot-email: claim ${key} failed: ${error.message}`);
       return "error";
+    },
+
+    // The LOI /apply inserts right after the pilot row: same application,
+    // same user. Only its id is read: nothing from the LOI goes into the email.
+    async hasSignedLoi(applicationId, userId) {
+      if (!db) return { signed: false, error: "Supabase service credentials missing" };
+      const { data, error } = await db
+        .from("loi_signatures")
+        .select("id")
+        .eq("pilot_application_id", applicationId)
+        .eq("user_id", userId)
+        .limit(1);
+      if (error) return { signed: false, error: error.message || "query failed" };
+      return { signed: Array.isArray(data) && data.length > 0 };
     },
 
     async sendEmail(apiKey, email) {

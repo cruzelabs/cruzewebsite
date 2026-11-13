@@ -51,7 +51,7 @@ Dashboard → **Database** → **Replication** → toggle on for:
 
 Deploy the `send-pilot-email` Edge Function with JWT verification off, then run migration **`20261022_024_pilot_email_no_key.sql`**, which creates its ledger table and its two **Database Webhooks**:
 
-1. `pilot_applications` **INSERT** → `send-pilot-email` (confirmation to `contact_email`, else the applicant's account email)
+1. `pilot_applications` **INSERT** → `send-pilot-email` (confirmation to `contact_email`, else the applicant's account email; it mentions the signed LOI only if the `loi_signatures` row is already there when the function runs, since `/apply` inserts it in a second request)
 2. `pilot_applications` **UPDATE** → `send-pilot-email` (email for the new status; includes `fleet_visible_message` when set)
 
 ```bash

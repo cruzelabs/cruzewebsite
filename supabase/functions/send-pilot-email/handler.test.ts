@@ -31,30 +31,41 @@ const pilotRow = (over: Row = {}): Row => ({
   ...over,
 });
 
+// The LOI /apply inserts after the pilot row: same application, same user.
+const loiRow = (over: Row = {}): Row => ({ pilot_application_id: ID, user_id: USER, ...over });
+
 type Fake = Deps & {
   rows: Map<string, Row>;
+  // loi_signatures, as far as the function looks at it.
+  lois: Row[];
   sent: Email[];
   ledger: Set<string>;
   loads: string[];
   lookups: string[];
+  loiLookups: { applicationId: string; userId: string }[];
 };
 
 function fake(opts: {
   rows?: Row[];
+  lois?: Row[];
   env?: Record<string, string>;
   profileEmail?: string | null;
   loadError?: string;
   lookupError?: string;
   claimError?: boolean;
+  loiError?: string;
+  loiThrows?: boolean;
   resendStatus?: number;
 } = {}): Fake {
   const env = opts.env ?? ENV;
   const d: Fake = {
     rows: new Map((opts.rows ?? []).map((r) => [r.id, r])),
+    lois: opts.lois ?? [],
     sent: [],
     ledger: new Set(),
     loads: [],
     lookups: [],
+    loiLookups: [],
     env: (name) => env[name],
     now: () => NOW,
     loadRow(id) {
@@ -72,6 +83,15 @@ function fake(opts: {
       if (d.ledger.has(key)) return Promise.resolve("duplicate");
       d.ledger.add(key);
       return Promise.resolve("claimed");
+    },
+    hasSignedLoi(applicationId, userId) {
+      d.loiLookups.push({ applicationId, userId });
+      if (opts.loiThrows) return Promise.reject(new Error("connection reset"));
+      // The query index.ts runs: this application, signed by this user.
+      const signed = d.lois.some((l) => l.pilot_application_id === applicationId && l.user_id === userId);
+      // An answer that comes with an error is not to be believed.
+      if (opts.loiError) return Promise.resolve({ signed, error: opts.loiError });
+      return Promise.resolve({ signed });
     },
     sendEmail(_apiKey, email) {
       const status = opts.resendStatus ?? 200;
@@ -382,15 +402,124 @@ Deno.test("only the approval email points at the Client Portal", () => {
   assert(approved.text.includes(CLIENT_PORTAL_URL));
 });
 
-Deno.test("the confirmation email mentions the LOI the /apply wizard has the fleet sign", () => {
-  // /apply inserts a loi_signatures row with every application (src/pages/Apply.tsx),
-  // so "signed LOI" is true of every applicant who gets this email.
-  const mail = renderPilotSubmittedEmail({
-    email: "dana@acme.example",
-    companyName: "Acme <Freight>",
-    dashboardUrl: "https://cruzemaps.com/fleet-dashboard",
-  });
-  assert(mail.text.includes("signed LOI"));
+const NO_LOI_LINE = "Our team will review your application within two business days.";
+const LOI_LINE = "Our team will review your application and signed LOI within two business days.";
+const namesLoi = (mail: { html: string; text: string }) => /LOI/i.test(mail.html) || /LOI/i.test(mail.text);
+
+Deno.test("the confirmation names the signed LOI when one is on file for the application", async () => {
+  const d = fake({ rows: [pilotRow()], lois: [loiRow()] });
+  assertEquals((await call(d, insertPayload())).body, { ok: true, id: "email-1", event: "INSERT" });
+  // Looked up for the stored row's application and applicant, once, after the claim.
+  assertEquals(d.loiLookups, [{ applicationId: ID, userId: USER }]);
+  const mail = d.sent[0];
+  assertEquals(mail.subject, "We received your Cruze pilot application");
+  assert(mail.html.includes(`${LOI_LINE} You can track status anytime on your fleet dashboard. (Acme Freight)`));
+  assert(mail.text.includes(`${LOI_LINE} You can track status anytime on your fleet dashboard. (Acme Freight)`));
+  assert(!mail.text.includes(NO_LOI_LINE));
+});
+
+Deno.test("with no LOI on file the confirmation says your application and nothing about an LOI", async () => {
+  // /apply inserts the LOI in a second request, so the insert webhook can run
+  // first; and an applicant can insert a pilot row with no LOI at all.
+  const d = fake({ rows: [pilotRow()] });
+  assertEquals((await call(d, insertPayload())).body, { ok: true, id: "email-1", event: "INSERT" });
+  assertEquals(d.loiLookups, [{ applicationId: ID, userId: USER }]);
+  const mail = d.sent[0];
+  assertEquals(mail.subject, "We received your Cruze pilot application");
+  assert(mail.html.includes("Application received"));
+  assert(mail.html.includes(`Thanks for applying. ${NO_LOI_LINE} You can track status anytime on your fleet dashboard. (Acme Freight)`));
+  assert(mail.text.includes(`Thanks for applying. ${NO_LOI_LINE} You can track status anytime on your fleet dashboard. (Acme Freight)`));
+  assert(!namesLoi(mail), mail.text);
+
+  // The LOI lands a moment later. The confirmation went out once and is not
+  // sent again, so what it said stays true.
+  d.lois.push(loiRow());
+  assertEquals((await call(d, insertPayload())).body, { skipped: "already emailed" });
+  assertEquals(d.sent.length, 1);
+  assertEquals(d.loiLookups.length, 1);
+});
+
+Deno.test("an LOI for another application, or signed by another account, is not this applicant's signed LOI", async () => {
+  const other = "9c5b94b1-35ad-49bb-b118-8e8fc24abf80";
+  for (const lois of [[loiRow({ pilot_application_id: other })], [loiRow({ user_id: STAFF })], [loiRow({ pilot_application_id: null })]]) {
+    const d = fake({ rows: [pilotRow()], lois });
+    assertEquals((await call(d, insertPayload())).body.ok, true);
+    assert(!namesLoi(d.sent[0]), JSON.stringify(lois));
+  }
+});
+
+Deno.test("a failed LOI lookup still sends the confirmation, without the LOI line", async () => {
+  for (const opts of [{ loiError: "permission denied" }, { loiThrows: true }]) {
+    const d = fake({ rows: [pilotRow()], lois: [loiRow()], ...opts });
+    const { status, body } = await call(d, insertPayload());
+    assertEquals(status, 200, JSON.stringify(opts));
+    assertEquals(body, { ok: true, id: "email-1", event: "INSERT" });
+    assertEquals(d.sent.length, 1);
+    assert(d.sent[0].text.includes(NO_LOI_LINE));
+    assert(!namesLoi(d.sent[0]));
+    assertEquals([...d.ledger], [ledgerKey(ID, "pending")]);
+  }
+  // A row with no applicant account cannot have a signed LOI: nothing is looked up.
+  const d = fake({ rows: [pilotRow({ user_id: null })], lois: [loiRow()] });
+  assertEquals((await call(d, insertPayload())).body.ok, true);
+  assertEquals(d.loiLookups.length, 0);
+  assert(!namesLoi(d.sent[0]));
+});
+
+Deno.test("no LOI is looked up for an email that is not sent, or whose copy never names one", async () => {
+  const stale = fake({ rows: [pilotRow({ created_at: minutesAgo(11) })], lois: [loiRow()] });
+  await call(stale, insertPayload());
+  const noRecipient = fake({ rows: [pilotRow({ contact_email: null })], lois: [loiRow()], profileEmail: null });
+  await call(noRecipient, insertPayload());
+  const replay = fake({ rows: [pilotRow()], lois: [loiRow()] });
+  await call(replay, insertPayload());
+  await call(replay, insertPayload());
+  assertEquals([stale.loiLookups.length, noRecipient.loiLookups.length, replay.loiLookups.length], [0, 0, 1]);
+
+  // Status emails: only "active" has copy about the LOI.
+  for (const status of ["in_review", "approved", "onboarding", "denied", "archived"]) {
+    review(replay, status);
+    assertEquals((await call(replay, updatePayload())).body.ok, true, status);
+    assert(!namesLoi(replay.sent[replay.sent.length - 1]), status);
+  }
+  assertEquals(replay.loiLookups.length, 1);
+  review(replay, "active");
+  assertEquals((await call(replay, updatePayload())).body.ok, true);
+  assertEquals(replay.loiLookups.length, 2);
+});
+
+Deno.test("the active email points at the signed LOI only when one is on file", async () => {
+  const withLoi = fake({ rows: [pilotRow()], lois: [loiRow()] });
+  const without = fake({ rows: [pilotRow()] });
+  for (const d of [withLoi, without]) {
+    await call(d, insertPayload());
+    review(d, "active");
+    assertEquals((await call(d, updatePayload())).body.ok, true);
+    assertEquals(d.sent[1].subject, "Your Cruze pilot is now active");
+  }
+  assert(withLoi.sent[1].text.includes("Open your fleet dashboard to view pilot status and your signed LOI."));
+  assert(without.sent[1].text.includes("Open your fleet dashboard to view pilot status.\n"));
+  assert(without.sent[1].html.includes("Open your fleet dashboard to view pilot status.</p>"));
+  assert(!namesLoi(without.sent[1]));
+});
+
+Deno.test("no email names an LOI unless the caller says one is signed", () => {
+  const vars = { email: "dana@acme.example", companyName: "Acme <Freight>", dashboardUrl: "https://cruzemaps.com/fleet-dashboard" };
+  const statuses = ["pending", "in_review", "approved", "onboarding", "active", "denied", "archived", "something_new"];
+  // loiSigned left out (a caller from before the field), false, or not a boolean.
+  for (const loiSigned of [undefined, false, null, "yes", 1] as unknown as (boolean | undefined)[]) {
+    assert(!namesLoi(renderPilotSubmittedEmail({ ...vars, loiSigned })), String(loiSigned));
+    for (const status of statuses) {
+      assert(!namesLoi(renderPilotStatusEmail({ ...vars, status, loiSigned })), `${status} ${loiSigned}`);
+    }
+  }
+  // With a signed LOI, the two emails whose copy is about it name it.
+  assert(renderPilotSubmittedEmail({ ...vars, loiSigned: true }).text.includes(LOI_LINE));
+  const named = statuses.filter((status) => namesLoi(renderPilotStatusEmail({ ...vars, status, loiSigned: true })));
+  assertEquals(named, ["pending", "active"]);
+
+  const mail = renderPilotSubmittedEmail(vars);
+  assert(mail.text.includes(NO_LOI_LINE));
   assert(mail.html.includes("(Acme &lt;Freight&gt;)"));
   // No download link unless the caller passes one.
   assert(!mail.html.includes("Download your signed LOI"));

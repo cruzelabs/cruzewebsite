@@ -27,14 +27,29 @@ const SITE = "https://cruzemaps.com";
 // the full URL so the plain-text email keeps it when the tags are stripped.
 export const CLIENT_PORTAL_URL = "https://client.cruzemaps.com";
 
-const STATUS_COPY: Record<
-  string,
-  { subject: string; headline: string; body: string; accent: string; accentBar: string }
-> = {
+// `body` must be true of every application, so it never names an LOI.
+// `bodyWithLoi` is used in its place only when the caller found a signed LOI
+// on file for the application (handler.ts, hasSignedLoi). /apply signs the
+// LOI in a second request after the pilot row is in, and a pilot row can be
+// inserted with no LOI at all, so an email sent off the pilot row cannot take
+// the LOI for granted.
+interface StatusCopy {
+  subject: string;
+  headline: string;
+  body: string;
+  bodyWithLoi?: string;
+  accent: string;
+  accentBar: string;
+}
+
+const bodyFor = (copy: StatusCopy, loiSigned?: boolean) => (loiSigned === true && copy.bodyWithLoi) || copy.body;
+
+const STATUS_COPY: Record<string, StatusCopy> = {
   pending: {
     subject: "We received your Cruze pilot application",
     headline: "Application received",
-    body: "Thanks for applying. Our team will review your fleet profile and signed LOI within two business days. You can track status anytime on your fleet dashboard.",
+    body: "Thanks for applying. Our team will review your application within two business days. You can track status anytime on your fleet dashboard.",
+    bodyWithLoi: "Thanks for applying. Our team will review your application and signed LOI within two business days. You can track status anytime on your fleet dashboard.",
     accent: BRAND.orange,
     accentBar: BRAND.orangeBright,
   },
@@ -62,7 +77,8 @@ const STATUS_COPY: Record<
   active: {
     subject: "Your Cruze pilot is now active",
     headline: "Pilot is live",
-    body: "Your fleet is active on Cruze coordination. Open your fleet dashboard to view pilot status and your signed LOI.",
+    body: "Your fleet is active on Cruze coordination. Open your fleet dashboard to view pilot status.",
+    bodyWithLoi: "Your fleet is active on Cruze coordination. Open your fleet dashboard to view pilot status and your signed LOI.",
     accent: BRAND.cyan,
     accentBar: BRAND.cyanBright,
   },
@@ -82,11 +98,19 @@ const STATUS_COPY: Record<
   },
 };
 
+// Whether the email for `status` has copy that names a signed LOI, so the
+// caller looks one up only when the answer changes the email. The
+// confirmation is the email for "pending".
+export const namesSignedLoi = (status: string): boolean => Boolean(STATUS_COPY[status]?.bodyWithLoi);
+
 export function renderPilotSubmittedEmail(vars: {
   email: string;
   companyName: string;
   dashboardUrl: string;
   loiUrl?: string;
+  // True only when a signed LOI for this application is on file right now.
+  // Left out or false, the email does not mention an LOI.
+  loiSigned?: boolean;
 }): { subject: string; html: string; text: string } {
   const copy = STATUS_COPY.pending;
   const ctaLabel = "View fleet dashboard";
@@ -102,7 +126,7 @@ export function renderPilotSubmittedEmail(vars: {
     preheader: `Application received for ${vars.companyName}.`,
     eyebrow: "Pilot application",
     headline: copy.headline,
-    body: `${copy.body}${vars.companyName ? ` (${escapeHtml(vars.companyName)})` : ""}`,
+    body: `${bodyFor(copy, vars.loiSigned)}${vars.companyName ? ` (${escapeHtml(vars.companyName)})` : ""}`,
     ctaUrl: vars.dashboardUrl,
     ctaLabel,
     accent: copy.accent,
@@ -118,8 +142,10 @@ export function renderPilotStatusEmail(vars: {
   status: string;
   dashboardUrl: string;
   fleetMessage?: string | null;
+  // As in renderPilotSubmittedEmail.
+  loiSigned?: boolean;
 }): { subject: string; html: string; text: string } {
-  const copy = STATUS_COPY[vars.status] ?? {
+  const copy: StatusCopy = STATUS_COPY[vars.status] ?? {
     subject: "Update on your Cruze pilot application",
     headline: "Status update",
     body: "Your application status has been updated. Sign in to your fleet dashboard for details.",
@@ -142,7 +168,7 @@ export function renderPilotStatusEmail(vars: {
     preheader: copy.headline,
     eyebrow: "Pilot application",
     headline: copy.headline,
-    body: copy.body,
+    body: bodyFor(copy, vars.loiSigned),
     ctaUrl: vars.dashboardUrl,
     ctaLabel: "Open fleet dashboard",
     accent: copy.accent,

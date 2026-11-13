@@ -25,8 +25,16 @@
 //     only when the row has a reviewed_by, which the admin portal sets when a
 //     staff member saves the message. Applicants cannot write either column
 //     (migration 025), so text an applicant typed is never sent as ours.
+//   - An email names a signed LOI only when one is on file for the
+//     application when the email is built: a loi_signatures row with this
+//     pilot_application_id and the applicant's user_id. /apply inserts the
+//     LOI in a second request after the pilot row (src/pages/Apply.tsx) and
+//     takes the pilot row back if signing fails, and an applicant can insert a
+//     pilot row with no LOI, so the insert webhook can get here before any
+//     LOI exists. Without one the confirmation says "your application" and
+//     nothing about an LOI. A failed lookup counts as no LOI.
 
-import { renderPilotStatusEmail, renderPilotSubmittedEmail } from "./template.ts";
+import { namesSignedLoi, renderPilotStatusEmail, renderPilotSubmittedEmail } from "./template.ts";
 
 export const TABLE = "pilot_applications";
 
@@ -76,6 +84,9 @@ export interface Deps {
   lookupEmail(userId: string): Promise<{ email: string | null; error?: string }>;
   // Record that `key` was emailed. "duplicate" when it already was.
   claim(key: string): Promise<ClaimResult>;
+  // Whether loi_signatures has a row for this application signed by this
+  // user. `error` is set on a query failure.
+  hasSignedLoi(applicationId: string, userId: string): Promise<{ signed: boolean; error?: string }>;
   sendEmail(apiKey: string, email: Email): Promise<SendResult>;
 }
 
@@ -136,17 +147,22 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   if (claim === "duplicate") return json({ skipped: "already emailed" });
   if (claim === "error") return json({ error: "could not record the email" }, 500);
 
+  // Only for an email whose copy can name the LOI, and read as late as
+  // possible: on INSERT the LOI row may be only moments away.
+  const loiSigned = namesSignedLoi(status) && await signedLoiOnFile(row, deps);
+
   const site = deps.env("SITE_BASE_URL") || DEFAULT_SITE;
   const dashboardUrl = `${site}/fleet-dashboard`;
   const companyName = row.company_name || "your fleet";
   const mail = event === "INSERT"
-    ? renderPilotSubmittedEmail({ email: recipient.email, companyName, dashboardUrl })
+    ? renderPilotSubmittedEmail({ email: recipient.email, companyName, dashboardUrl, loiSigned })
     : renderPilotStatusEmail({
       email: recipient.email,
       companyName,
       status,
       dashboardUrl,
       fleetMessage: staffMessage(row),
+      loiSigned,
     });
 
   const res = await deps.sendEmail(apiKey, {
@@ -169,6 +185,25 @@ export function staffMessage(row: Row): string | null {
   if (typeof row.reviewed_by !== "string" || !row.reviewed_by) return null;
   const message = typeof row.fleet_visible_message === "string" ? row.fleet_visible_message.trim() : "";
   return message || null;
+}
+
+// True only when the applicant's signed LOI for this application is on file
+// right now. The email is already claimed when this runs, so a lookup that
+// fails or throws must not stop it: it counts as no LOI, and the email then
+// says only what is true of every application.
+export async function signedLoiOnFile(row: Row, deps: Deps): Promise<boolean> {
+  if (typeof row.id !== "string" || typeof row.user_id !== "string" || !row.user_id) return false;
+  try {
+    const found = await deps.hasSignedLoi(row.id, row.user_id);
+    if (found.error) {
+      console.error(`send-pilot-email: could not look up the LOI for ${TABLE} ${row.id}: ${found.error}`);
+      return false;
+    }
+    return found.signed === true;
+  } catch (err) {
+    console.error(`send-pilot-email: LOI lookup for ${TABLE} ${row.id} threw: ${err instanceof Error ? err.message : err}`);
+    return false;
+  }
 }
 
 export function ledgerKey(id: string, status: string): string {

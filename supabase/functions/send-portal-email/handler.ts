@@ -6,6 +6,12 @@
 // - The sender is fixed (PORTAL_FROM_ADDRESS, default "Cruze <no-reply@cruzemaps.com>"); the caller cannot set it.
 // - Recipients, subject, text and attachments are checked for size and shape, and .invalid addresses
 //   (the portal's placeholders for cruzemaps.com sign-ins) are refused.
+// - The caller's Idempotency-Key header, when it sends one, goes to Resend unchanged, so the portal can retry a
+//   send that was cut off without a second email. Resend keeps a key for 24 hours: inside that window the same
+//   key with the same message returns the first send's id and sends nothing. The header is optional. A key
+//   that is not 1 to 256 printable ASCII characters is a 400, checked after the secret and before the body is
+//   read, so nothing was sent. Resend answers 409 when a key comes back with a different message or while the
+//   first request is still running; like any provider refusal that is a 502 here, with status 409.
 
 export const DEFAULT_FROM = "Cruze <no-reply@cruzemaps.com>";
 export const MAX_RECIPIENTS = 20;
@@ -16,6 +22,8 @@ export const MAX_ATTACHMENTS = 10;
 export const MAX_ATTACHMENT_BYTES = 28 * 1024 * 1024;
 /** Whole request, checked before the body is read. */
 export const MAX_REQUEST_BYTES = 40 * 1024 * 1024;
+/** Resend takes idempotency keys of 1 to 256 characters. */
+export const MAX_IDEMPOTENCY_KEY = 256;
 
 export interface Attachment {
   filename: string;
@@ -41,11 +49,14 @@ export interface SendResult {
 export interface Deps {
   env(name: string): string | undefined;
   secretMatches(provided: string, expected: string): boolean;
-  sendEmail(apiKey: string, email: Record<string, unknown>): Promise<SendResult>;
+  /** `idempotencyKey` is the caller's checked Idempotency-Key, or undefined when it sent none. */
+  sendEmail(apiKey: string, email: Record<string, unknown>, idempotencyKey?: string): Promise<SendResult>;
 }
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+const RESEND_URL = "https://api.resend.com/emails";
 
 const EMAIL = /^[^\s@<>(),;:"\\]+@[^\s@<>(),;:"\\]+\.[^\s@<>(),;:"\\]+$/;
 const FILENAME = /^[^/\\\0\r\n]{1,200}$/;
@@ -101,6 +112,27 @@ export function parseMessage(body: unknown): Message {
   return { to, cc, subject: b.subject.trim(), text: b.text, attachments };
 }
 
+/** 1 to 256 printable ASCII characters (space to ~): nothing that could end the header or start another. */
+export function validIdempotencyKey(key: string): boolean {
+  return key.length <= MAX_IDEMPOTENCY_KEY && /^[\x20-\x7E]+$/.test(key);
+}
+
+/**
+ * Deps.sendEmail over Resend's API. index.ts gives it the runtime's fetch and the tests a fake, so the tests see
+ * the request Resend gets. The idempotency key travels only as the Idempotency-Key header, and only when the
+ * caller sent one.
+ */
+export function resendSender(fetchImpl: typeof fetch): Deps["sendEmail"] {
+  return async (apiKey, email, idempotencyKey) => {
+    const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    const res = await fetchImpl(RESEND_URL, { method: "POST", headers, body: JSON.stringify(email) });
+    if (!res.ok) return { ok: false, status: res.status, text: await res.text() };
+    const body = await res.json().catch(() => ({}));
+    return { ok: true, status: res.status, id: body?.id };
+  };
+}
+
 export async function handle(req: Request, deps: Deps): Promise<Response> {
   if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
   const expected = deps.env("PORTAL_EMAIL_SECRET") ?? "";
@@ -112,6 +144,13 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
 
   const length = Number(req.headers.get("content-length") ?? "");
   if (!Number.isFinite(length) || length > MAX_REQUEST_BYTES) return json({ error: "request too large" }, 413);
+
+  // null when the header is absent (an older portal): the email is sent as before, with no key. A header that is
+  // present but empty is refused, not sent without a key: the caller would take that send for a safe retry.
+  const idempotencyKey = req.headers.get("idempotency-key");
+  if (idempotencyKey !== null && !validIdempotencyKey(idempotencyKey)) {
+    return json({ error: `idempotency key must be 1 to ${MAX_IDEMPOTENCY_KEY} printable ASCII characters` }, 400);
+  }
 
   let msg: Message;
   try {
@@ -130,7 +169,7 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   if (msg.attachments.length) {
     email.attachments = msg.attachments.map((a) => ({ filename: a.filename, content: a.contentBase64, ...(a.mime ? { content_type: a.mime } : {}) }));
   }
-  const r = await deps.sendEmail(apiKey, email);
+  const r = await deps.sendEmail(apiKey, email, idempotencyKey ?? undefined);
   if (!r.ok || !r.id) {
     // Status only: the provider's body can echo addresses or the message, so it is never logged or returned.
     console.error("send-portal-email: provider refused or gave no id", r.status);

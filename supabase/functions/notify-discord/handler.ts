@@ -27,7 +27,8 @@ export type Table = (typeof TABLES)[number];
 // Columns read back for each table. Nothing else from the row is used.
 export const COLUMNS: Record<Table, string> = {
   pilot_applications:
-    "id, company_name, truck_size, fleet_size, notes, contact_name, contact_email, fms_provider, website, created_at",
+    "id, company_name, truck_size, fleet_size, notes, contact_name, contact_email, contact_phone, contact_title, " +
+    "application_notes, fms_provider, website, created_at",
   loi_signatures:
     "id, participant_name, participant_company, participant_title, fleet_size, initials, signed_at, created_at",
   contact_messages: "id, name, email, organization, message, created_at",
@@ -39,6 +40,11 @@ export const CONTACT_FLOOD_WINDOW_MS = 10 * 60 * 1000;
 export const CONTACT_FLOOD_LIMIT = 10;
 export const CONTACT_PREVIEW_CHARS = 500;
 export const SLACK_MAX_CHARS = 3000;
+// Caps for the applicant's own text on a pilot application, in characters
+// after escaping. Discord allows 1024 per field and 6000 per embed.
+export const PILOT_PHONE_CHARS = 64;
+export const PILOT_TITLE_CHARS = 128;
+export const PILOT_APPLICANT_NOTES_CHARS = 1000;
 
 export const SITE_URL = "https://cruzemaps.com";
 export const ADMIN_MESSAGES_URL = `${SITE_URL}/admin?tab=messages`;
@@ -204,6 +210,11 @@ export function slackText(value: unknown): string {
     .replace(/>/g, "&gt;");
 }
 
+// True when a column holds something to show: not null, not blank.
+function filled(value: unknown): boolean {
+  return value != null && String(value).trim() !== "";
+}
+
 // One embed field value: escaped, never empty, at most 1024 characters.
 function fieldValue(value: unknown, max = 1024): string {
   const s = value == null ? "" : String(value);
@@ -231,14 +242,29 @@ export function pilotEmbed(row: Row): Row {
   if (row.contact_name) {
     fields.push({ name: "Contact", value: fieldValue(row.contact_name), inline: true });
   }
+  if (filled(row.contact_title)) {
+    fields.push({ name: "Title", value: fieldValue(row.contact_title, PILOT_TITLE_CHARS), inline: true });
+  }
   if (row.contact_email) {
     fields.push({ name: "Email", value: fieldValue(row.contact_email), inline: true });
+  }
+  if (filled(row.contact_phone)) {
+    fields.push({ name: "Phone", value: fieldValue(row.contact_phone, PILOT_PHONE_CHARS), inline: true });
   }
   if (row.fms_provider) {
     fields.push({ name: "FMS", value: fieldValue(row.fms_provider), inline: true });
   }
   if (row.website) {
     fields.push({ name: "Website", value: fieldValue(row.website), inline: false });
+  }
+  // application_notes is what the applicant typed on /apply; notes is the
+  // staff-only column.
+  if (filled(row.application_notes)) {
+    fields.push({
+      name: "Applicant notes",
+      value: fieldValue(row.application_notes, PILOT_APPLICANT_NOTES_CHARS),
+      inline: false,
+    });
   }
   if (row.notes) {
     fields.push({ name: "Admin notes", value: fieldValue(row.notes), inline: false });

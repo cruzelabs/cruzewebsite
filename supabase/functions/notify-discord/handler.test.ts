@@ -6,7 +6,20 @@
 // CI runs this in the "edge functions" job of .github/workflows/test.yml.
 
 import { assert, assertEquals } from "jsr:@std/assert@1.0.13";
-import { ADMIN_MESSAGES_URL, type Deps, handle, plain, type Row, slackText, type Table } from "./handler.ts";
+import {
+  ADMIN_MESSAGES_URL,
+  COLUMNS,
+  type Deps,
+  handle,
+  PILOT_APPLICANT_NOTES_CHARS,
+  PILOT_PHONE_CHARS,
+  PILOT_TITLE_CHARS,
+  pilotEmbed,
+  plain,
+  type Row,
+  slackText,
+  type Table,
+} from "./handler.ts";
 
 const NOW = new Date("2026-10-18T12:00:00Z");
 const ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -86,6 +99,9 @@ const pilotRow = (over: Row = {}): Row => ({
   notes: null,
   contact_name: "Dana Lee",
   contact_email: "dana@example.com",
+  contact_phone: null,
+  contact_title: null,
+  application_notes: null,
   fms_provider: "Samsara",
   website: "https://acme.example",
   created_at: minutesAgo(1),
@@ -314,4 +330,61 @@ Deno.test("slackText() undoes plain() and escapes only what Slack needs", () => 
   }
   assertEquals(slackText(plain("A&B <@U123> <!here>")), "A&amp;B &lt;@U123&gt; &lt;!here&gt;");
   assertEquals(slackText(`**${plain("Dana **Lee**")}** signed`), "*Dana **Lee*** signed");
+});
+
+Deno.test("a pilot application keeps the contact's phone, title and the applicant's notes", async () => {
+  for (const col of ["contact_phone", "contact_title", "application_notes"]) {
+    assert(COLUMNS.pilot_applications.split(/,\s*/).includes(col), col);
+  }
+  const row = pilotRow({
+    contact_phone: "+1 (512) 555-0100",
+    contact_title: "VP *Ops* <!channel>",
+    application_notes: "[Reset](https://evil.example)\n# 40 trucks on I-35 & I-10",
+    notes: "Call Tue",
+  });
+  const d = fake({ env: { ...ENV, ...SLACK_ENV }, rows: { pilot_applications: row } });
+  const { body } = await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  assertEquals(body, { ok: true, table: "pilot_applications" });
+
+  const fields: Row[] = d.posts[0].body.embeds[0].fields;
+  assertEquals(fields.map((f) => f.name), [
+    "Company", "Fleet size", "Truck class", "Contact", "Title", "Email", "Phone", "FMS", "Website",
+    "Applicant notes", "Admin notes",
+  ]);
+  const value = (name: string) => fields.find((f) => f.name === name)!.value;
+  // Escaped like the other applicant text: no masked link, heading, bold or mention.
+  assertEquals(value("Phone"), "+1 \\(512\\) 555-0100");
+  assertEquals(value("Title"), "VP \\*Ops\\* \\<!channel\\>");
+  assertEquals(value("Applicant notes"), "\\[Reset\\]\\(https://evil.example\\)\n\\# 40 trucks on I-35 & I-10");
+  assertEquals(d.posts[0].body.allowed_mentions, { parse: [] });
+
+  const slack: string = d.posts[1].body.text;
+  const lines = slack.split("\n");
+  assert(lines.includes("*Phone:* +1 (512) 555-0100"));
+  assert(lines.includes("*Title:* VP *Ops* &lt;!channel&gt;"));
+  assert(slack.includes("*Applicant notes:* [Reset](https://evil.example)\n# 40 trucks on I-35 &amp; I-10"));
+  assert(!slack.replace("<https://cruzemaps.com/admin>", "").includes("<"));
+});
+
+Deno.test("the applicant's text on a pilot application is capped", () => {
+  const embed = pilotEmbed(pilotRow({
+    contact_phone: "5".repeat(500),
+    contact_title: "*".repeat(500),
+    application_notes: "x".repeat(5000),
+  })).embeds[0];
+  const value = (name: string) => embed.fields.find((f: Row) => f.name === name).value;
+  assertEquals(value("Phone").length, PILOT_PHONE_CHARS);
+  assertEquals(value("Title").length, PILOT_TITLE_CHARS);
+  assertEquals(value("Applicant notes").length, PILOT_APPLICANT_NOTES_CHARS);
+  assert(value("Applicant notes").endsWith("…"));
+});
+
+Deno.test("missing, null and blank contact details add no fields", () => {
+  const names = (row: Row) => pilotEmbed(row).embeds[0].fields.map((f: Row) => f.name);
+  const base = ["Company", "Fleet size", "Truck class", "Contact", "Email", "FMS", "Website"];
+  assertEquals(names(pilotRow()), base);
+  assertEquals(names(pilotRow({ contact_phone: "  ", contact_title: "", application_notes: "\n" })), base);
+  // A row read before the columns were selected has no such keys at all.
+  const { contact_phone: _p, contact_title: _t, application_notes: _n, ...old } = pilotRow();
+  assertEquals(names(old), base);
 });

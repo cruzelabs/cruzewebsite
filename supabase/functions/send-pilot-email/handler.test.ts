@@ -491,16 +491,25 @@ Deno.test("no LOI is looked up for an email that is not sent, or whose copy neve
 Deno.test("the active email points at the signed LOI only when one is on file", async () => {
   const withLoi = fake({ rows: [pilotRow()], lois: [loiRow()] });
   const without = fake({ rows: [pilotRow()] });
-  for (const d of [withLoi, without]) {
+  // An LOI row under the reviewing staff member's account is not the applicant's.
+  const staffOnly = fake({ rows: [pilotRow()], lois: [loiRow({ user_id: STAFF })] });
+  for (const d of [withLoi, without, staffOnly]) {
     await call(d, insertPayload());
+    // A reviewed row names two accounts: the applicant and the staff member.
     review(d, "active");
+    d.rows.set(ID, { ...d.rows.get(ID), reviewed_by: STAFF });
     assertEquals((await call(d, updatePayload())).body.ok, true);
     assertEquals(d.sent[1].subject, "Your Cruze pilot is now active");
+    // The LOI is looked up for the applicant, both times.
+    assertEquals(d.loiLookups, [{ applicationId: ID, userId: USER }, { applicationId: ID, userId: USER }]);
   }
   assert(withLoi.sent[1].text.includes("Open your fleet dashboard to view pilot status and your signed LOI."));
-  assert(without.sent[1].text.includes("Open your fleet dashboard to view pilot status.\n"));
-  assert(without.sent[1].html.includes("Open your fleet dashboard to view pilot status.</p>"));
-  assert(!namesLoi(without.sent[1]));
+  for (const d of [without, staffOnly]) {
+    assert(d.sent[1].text.includes("Open your fleet dashboard to view pilot status.\n"));
+    assert(d.sent[1].html.includes("Open your fleet dashboard to view pilot status.</p>"));
+    assert(!namesLoi(d.sent[1]));
+    assert(!namesLoi(d.sent[0]));
+  }
 });
 
 Deno.test("no email names an LOI unless the caller says one is signed", () => {

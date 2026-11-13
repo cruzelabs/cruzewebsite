@@ -29,13 +29,28 @@ export function normalizePath(pathname: string): string {
   return (trimmed || "/").toLowerCase();
 }
 
+// React Router matches the decoded path, so /d%61shboard renders /dashboard.
+// Decode each segment the same way React Router does (an encoded "/" stays
+// "%2f" inside its segment); a malformed escape is not a route, so null.
+function decodeSegments(path: string): string[] | null {
+  const segments = path.split("/");
+  if (!path.includes("%")) return segments;
+  try {
+    return segments.map((segment) => decodeURIComponent(segment).replace(/\//g, "%2f").toLowerCase());
+  } catch {
+    return null;
+  }
+}
+
 export function createRouteMatcher(manifest: RouteManifest): (pathname: string) => boolean {
   const statics = new Set(manifest.static);
   const patterns = manifest.patterns.map((p) => p.split("/"));
   return (pathname) => {
     const path = normalizePath(pathname);
     if (statics.has(path)) return true;
-    const segments = path.split("/");
+    const segments = decodeSegments(path);
+    if (!segments) return false;
+    if (path.includes("%") && statics.has(segments.join("/"))) return true;
     return patterns.some(
       (pattern) =>
         pattern.length === segments.length &&

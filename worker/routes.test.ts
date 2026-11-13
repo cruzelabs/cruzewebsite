@@ -37,6 +37,10 @@ function sampleFor(routePath: string): Promise<string> | string {
   return routePath.replace(/:[^/]+/g, "sample-1234");
 }
 
+// A second, unrelated value for each open param, so a manifest that listed one
+// literal sample instead of a pattern would still fail.
+const OTHER_PARAM = "7d4c2e1a-aaaa-4bbb-8ccc-0123456789ab";
+
 describe("route manifest vs src/App.tsx", () => {
   it("the AST walk sees exactly the routes a text search finds", () => {
     expect(regexRoutePaths.length).toBeGreaterThan(30);
@@ -48,7 +52,9 @@ describe("route manifest vs src/App.tsx", () => {
     for (const { path: p, devOnly } of appRoutes) {
       if (devOnly || p === "*") continue;
       const sample = await sampleFor(p);
-      for (const variant of [sample, `${sample}/`, sample.toUpperCase()]) {
+      const variants = [sample, `${sample}/`, sample.toUpperCase()];
+      if (p.includes(":") && !CONTENT_ROUTES[p]) variants.push(p.replace(/:[^/]+/g, OTHER_PARAM));
+      for (const variant of variants) {
         if (!isKnown(variant)) missing.push(variant);
       }
     }
@@ -109,7 +115,17 @@ describe("route manifest vs src/App.tsx", () => {
 describe("createRouteMatcher", () => {
   const match = createRouteMatcher({ static: ["/", "/faq", "/insights/known"], patterns: ["/invite/:token"] });
 
-  it.each(["/", "/faq", "/faq/", "/FAQ", "/insights/known", "/invite/abc", "/invite/abc/"])("knows %s", (p) => {
+  it.each([
+    "/",
+    "/faq",
+    "/faq/",
+    "/FAQ",
+    "/f%61q",
+    "/insights/known",
+    "/invite/abc",
+    "/invite/abc/",
+    "/invite/a%2Fb",
+  ])("knows %s", (p) => {
     expect(match(p)).toBe(true);
   });
 
@@ -124,6 +140,9 @@ describe("createRouteMatcher", () => {
     "/invite/",
     "/invite/a/b",
     "/assets/missing-abc123.js",
+    "/f%61q%",
+    "/insights%2Fknown",
+    "/%E0%A4%A",
   ])("rejects %s", (p) => {
     expect(match(p)).toBe(false);
   });

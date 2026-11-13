@@ -10,6 +10,9 @@
   // client-side route (/dashboard, /invite/<token>) with the SPA shell and 200,
   // and anything else (/.env, /no-such-page) with the same shell and 404.
   // worker/route-manifest.json comes from `npm run build`, so build first.
+  // Browser navigations reach the Worker too: the navigation shortcut that is
+  // on by default since 2025-04-01 only applies a not_found_handling mode, and
+  // "none" has no fallback, so a miss still runs the Worker.
   "main": "worker/index.ts",
   "assets": {
     "directory": "dist",

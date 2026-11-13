@@ -24,6 +24,7 @@ import {
   pilotEmbed,
   pilotNotice,
   plain,
+  RAW_MAX_CHARS,
   type Row,
   SLACK_MAX_CHARS,
   slackMessage,
@@ -856,4 +857,35 @@ Deno.test("line breaks in a one-line value are collapsed; notes keep theirs", ()
   const value = (name: string) => embed.fields.find((f: Row) => f.name === name).value;
   assertEquals(value("Title"), "VP Ops");
   assertEquals(value("Applicant notes"), "a\nb\n\nc");
+});
+
+// Half a surrogate pair: a high half with no low half after it, or a low half
+// with no high half before it.
+const HALF_PAIR = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+Deno.test("the raw cap never leaves half an emoji, even when the rest of the value collapses", () => {
+  // Whitespace up to the cap, then an emoji across it. The whitespace
+  // collapses, so the value is short and no later cut would drop the half.
+  const line = "Acme" + " ".repeat(RAW_MAX_CHARS - 5) + "😀";
+  const lines = "Hi" + "\n".repeat(RAW_MAX_CHARS - 3) + "😀";
+  assertEquals([line.length, lines.length], [RAW_MAX_CHARS + 1, RAW_MAX_CHARS + 1]);
+  const notices: Notice[] = [
+    pilotNotice(pilotRow({ company_name: line, contact_title: line, application_notes: lines, notes: lines })),
+    loiNotice(loiRow({ participant_name: line, participant_company: line })),
+    contactNotice(contactRow({ name: line, organization: line, message: lines })),
+  ];
+  for (const notice of notices) {
+    for (const s of [...allStrings(discordMessage(notice)), ...allStrings(slackMessage(notice))]) {
+      assert(!HALF_PAIR.test(s), JSON.stringify(s));
+    }
+  }
+  const pilot = pilotEmbed(pilotRow({ company_name: line, application_notes: lines })).embeds[0];
+  const value = (name: string) => pilot.fields.find((f: Row) => f.name === name).value;
+  assertEquals(value("Company"), "Acme");
+  assertEquals(value("Applicant notes"), "Hi");
+  assertEquals(slackTexts(slackMessage(loiNotice(loiRow({ participant_name: line }))))[1], "*Acme* just signed the Letter of Intent.");
+  // An emoji that ends at the cap is whole, and is kept.
+  const fits = "Acme" + " ".repeat(RAW_MAX_CHARS - 6) + "😀";
+  assertEquals(fits.length, RAW_MAX_CHARS);
+  assertEquals(pilotEmbed(pilotRow({ company_name: fits })).embeds[0].fields[0].value, "Acme 😀");
 });

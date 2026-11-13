@@ -239,8 +239,11 @@ const LINE_BREAKS = /\r\n?|[\n\v\f\u0085\u2028\u2029]/g;
 
 // Text columns have no length limit. No notice shows more than a field's
 // 1024 characters, so the rest is dropped before any escaping work is done.
-const RAW_MAX_CHARS = 8192;
-const raw = (value: unknown) => (value == null ? "" : String(value).slice(0, RAW_MAX_CHARS));
+// The cap can fall inside a surrogate pair (an emoji), and when what is left
+// is short (the rest was whitespace, which collapses) no later cut drops the
+// half, so it is dropped here.
+export const RAW_MAX_CHARS = 8192;
+const raw = (value: unknown) => (value == null ? "" : dropHalfPair(String(value).slice(0, RAW_MAX_CHARS)));
 
 // Raw row text as one line.
 function oneLine(value: unknown): string {

@@ -21,7 +21,7 @@ After saving, trigger a redeploy so the build picks them up. The site builds and
 
 ### b) Confirm SPA + sitemap routing
 
-`wrangler.jsonc` already has `not_found_handling: "single-page-application"` — leave it. Our `scripts/prerender.mjs` step now writes per-route `dist/<path>/index.html` files so Cloudflare serves real HTML for `/for-fleets`, `/for-cities`, `/investors`, etc. Unknown routes still fall back to the SPA shell, which is what you want.
+`wrangler.jsonc` serves `dist/` first with `not_found_handling: "none"` and runs the site Worker (`worker/index.ts`) only for a request that matches no file. Our `scripts/prerender.mjs` step writes per-route `dist/<path>/index.html` files so Cloudflare serves real HTML for `/for-fleets`, `/for-cities`, `/investors`, etc. The Worker answers client-side routes (`/dashboard`, `/invite/<token>`) with the SPA shell and 200 and every other path with the same shell and 404, using the route list `scripts/route-manifest.mjs` writes during `npm run build`. See CLAUDE.md, Deployment.
 
 After your next deploy, verify:
 

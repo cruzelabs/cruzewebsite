@@ -48,7 +48,7 @@ const STATUS_COPY: Record<
   approved: {
     subject: "Your Cruze pilot application was approved",
     headline: "You're approved for the pilot",
-    body: `Welcome aboard. Sign in at <a href="${CLIENT_PORTAL_URL}" style="color:${BRAND.orange};">${CLIENT_PORTAL_URL}</a> with the account you used to apply. Check your fleet dashboard for kickoff details and next steps from our team.`,
+    body: `Welcome aboard. Next, our team sets up your fleet's portal at <a href="${CLIENT_PORTAL_URL}" style="color:${BRAND.orange};">${CLIENT_PORTAL_URL}</a>, where you will sign in with the account you used to apply. Check your fleet dashboard for kickoff details and next steps from our team.`,
     accent: BRAND.orange,
     accentBar: BRAND.orangeBright,
   },

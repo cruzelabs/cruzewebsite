@@ -358,9 +358,9 @@ Deno.test("the approval email says where to sign in, as a link and in plain text
   assertEquals((await call(d, updatePayload())).body.ok, true);
   const mail = d.sent[1];
   assertEquals(CLIENT_PORTAL_URL, "https://client.cruzemaps.com");
-  assert(mail.html.includes(`Sign in at <a href="${CLIENT_PORTAL_URL}"`));
-  assert(mail.html.includes("with the account you used to apply"));
-  assert(mail.text.includes(`Sign in at ${CLIENT_PORTAL_URL} with the account you used to apply.`));
+  assert(mail.html.includes(`sets up your fleet's portal at <a href="${CLIENT_PORTAL_URL}"`));
+  assert(mail.html.includes("where you will sign in with the account you used to apply"));
+  assert(mail.text.includes(`portal at ${CLIENT_PORTAL_URL}, where you will sign in with the account you used to apply.`));
   assert(!mail.text.includes("<a"));
   // The fleet dashboard button stays.
   assert(mail.html.includes('href="https://cruzemaps.com/fleet-dashboard"'));

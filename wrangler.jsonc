@@ -5,10 +5,17 @@
   "compatibility_flags": ["nodejs_compat"],
   // Served only on cruzemaps.com: no public copy on workers.dev.
   "workers_dev": false,
+  // Files in dist/ are served first and never run the Worker. Only a request
+  // that matches no file reaches worker/index.ts, which answers a real
+  // client-side route (/dashboard, /invite/<token>) with the SPA shell and 200,
+  // and anything else (/.env, /no-such-page) with the same shell and 404.
+  // worker/route-manifest.json comes from `npm run build`, so build first.
+  "main": "worker/index.ts",
   "assets": {
     "directory": "dist",
+    "binding": "ASSETS",
     "html_handling": "drop-trailing-slash",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "none"
   },
   "observability": {
     "enabled": true

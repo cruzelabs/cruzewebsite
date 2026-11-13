@@ -9,15 +9,23 @@ import { assert, assertEquals } from "jsr:@std/assert@1.0.13";
 import {
   ADMIN_MESSAGES_URL,
   COLUMNS,
+  contactNotice,
   type Deps,
+  DISCORD_EMBED_MAX_CHARS,
+  discordMessage,
   handle,
+  loiNotice,
+  type Notice,
   PILOT_APPLICANT_NOTES_CHARS,
   PILOT_PHONE_CHARS,
   PILOT_TITLE_CHARS,
   pilotEmbed,
+  pilotNotice,
   plain,
   type Row,
-  slackText,
+  SLACK_MAX_CHARS,
+  slackMessage,
+  slackPlain,
   type Table,
 } from "./handler.ts";
 
@@ -299,9 +307,13 @@ Deno.test("SLACK_WEBHOOK_URL alone posts the notice to Slack as escaped text", a
   const lines: string[] = d.posts[0].body.text.split("\n");
   assertEquals(lines[0], "*New contact message*");
   assert(lines.includes("*Name:* &lt;!channel&gt; &amp; co"));
-  assert(lines.includes("*Message:* [Reset](https://evil.example) *hi*"));
-  assert(lines.includes(`*Admin tab:* ${ADMIN_MESSAGES_URL}`));
-  assert(!d.posts[0].body.text.includes("<"));
+  // Our link is the third line, above everything the sender typed.
+  assertEquals(lines[2], `*Admin tab:* <${ADMIN_MESSAGES_URL}>`);
+  assert(lines.includes("*Name:* &lt;!channel&gt; &amp; co"));
+  // The message is quoted, its URL is not one Slack would link, and its
+  // asterisks are look-alikes that Slack does not read as bold.
+  assertEquals(lines.slice(-2), ["*Message:*", "> [Reset](evil.example) \u2217hi\u2217"]);
+  assertEquals(d.posts[0].body.text.match(/<[^>]*>/g), [`<${ADMIN_MESSAGES_URL}>`]);
 });
 
 Deno.test("with both webhooks set the notice goes to Discord and Slack", async () => {
@@ -313,7 +325,7 @@ Deno.test("with both webhooks set the notice goes to Discord and Slack", async (
   const lines: string[] = d.posts[1].body.text.split("\n");
   assertEquals(lines[0], "*✍️ LOI signed*");
   assertEquals(lines[1], "*Dana Lee* just signed the Letter of Intent.");
-  assertEquals(lines.at(-1), `<https://cruzemaps.com/loi/${ID}>`);
+  assertEquals(lines[2], `*Signed LOI:* <https://cruzemaps.com/loi/${ID}>`);
 });
 
 Deno.test("a Slack failure is a 500 that names Slack, and Discord still gets the notice", async () => {
@@ -324,12 +336,15 @@ Deno.test("a Slack failure is a 500 that names Slack, and Discord still gets the
   assertEquals(d.posts.length, 2);
 });
 
-Deno.test("slackText() undoes plain() and escapes only what Slack needs", () => {
-  for (const s of ["[click](https://x.example)", "# Big\n- item", "back\\slash \\# and `code`", "a_b ~c~ ||d||"]) {
-    assertEquals(slackText(plain(s)), s);
-  }
-  assertEquals(slackText(plain("A&B <@U123> <!here>")), "A&amp;B &lt;@U123&gt; &lt;!here&gt;");
-  assertEquals(slackText(`**${plain("Dana **Lee**")}** signed`), "*Dana **Lee*** signed");
+Deno.test("slackPlain() leaves row text with nothing Slack would format or link", () => {
+  assertEquals(slackPlain("A&B <@U123> <!here>"), "A&amp;B &lt;@U123&gt; &lt;!here&gt;");
+  assertEquals(slackPlain("*bold* ~gone~ `code` _it_"), "\u2217bold\u2217 \u223cgone\u223c \u02cbcode\u02cb \uff3fit\uff3f");
+  // An underscore inside a word is not formatting, so addresses stay as typed.
+  assertEquals(slackPlain("dana_lee@example.com +1 (512) 555-0100"), "dana_lee@example.com +1 (512) 555-0100");
+  assertEquals(slackPlain("see https://evil.example/a?b=1 or HTTP://x.example"), "see evil.example/a?b=1 or x.example");
+  // Dropping a scheme cannot leave another one behind.
+  assertEquals(slackPlain("hthttps://tps://evil.example slack://open"), "evil.example open");
+  assertEquals(slackPlain(null), "");
 });
 
 Deno.test("a pilot application keeps the contact's phone, title and the applicant's notes", async () => {
@@ -361,9 +376,9 @@ Deno.test("a pilot application keeps the contact's phone, title and the applican
   const slack: string = d.posts[1].body.text;
   const lines = slack.split("\n");
   assert(lines.includes("*Phone:* +1 (512) 555-0100"));
-  assert(lines.includes("*Title:* VP *Ops* &lt;!channel&gt;"));
-  assert(slack.includes("*Applicant notes:* [Reset](https://evil.example)\n# 40 trucks on I-35 &amp; I-10"));
-  assert(!slack.replace("<https://cruzemaps.com/admin>", "").includes("<"));
+  assert(lines.includes("*Title:* VP \u2217Ops\u2217 &lt;!channel&gt;"));
+  assert(slack.includes("*Applicant notes:*\n> [Reset](evil.example)\n> # 40 trucks on I-35 &amp; I-10\n"));
+  assertEquals(slack.match(/<[^>]*>/g), ["<https://cruzemaps.com/admin>"]);
 });
 
 Deno.test("the applicant's text on a pilot application is capped", () => {
@@ -374,7 +389,9 @@ Deno.test("the applicant's text on a pilot application is capped", () => {
   })).embeds[0];
   const value = (name: string) => embed.fields.find((f: Row) => f.name === name).value;
   assertEquals(value("Phone").length, PILOT_PHONE_CHARS);
-  assertEquals(value("Title").length, PILOT_TITLE_CHARS);
+  // A cut never ends on half an escape, so this one is a character short.
+  assertEquals(value("Title"), "\\*".repeat(63) + "…");
+  assert(value("Title").length <= PILOT_TITLE_CHARS);
   assertEquals(value("Applicant notes").length, PILOT_APPLICANT_NOTES_CHARS);
   assert(value("Applicant notes").endsWith("…"));
 });
@@ -387,4 +404,149 @@ Deno.test("missing, null and blank contact details add no fields", () => {
   // A row read before the columns were selected has no such keys at all.
   const { contact_phone: _p, contact_title: _t, application_notes: _n, ...old } = pilotRow();
   assertEquals(names(old), base);
+});
+
+// Every Slack line that starts a field, and every link, in a Slack message.
+const slackLabels = (text: string) => text.split("\n").filter((l) => /^\s*\*/.test(l)).map((l) => l.match(/^\s*\*[^*]*\*/)?.[0]);
+const slackLinks = (text: string) => text.match(/<[^>]*>/g) ?? [];
+// What Slack turns into a link on its own: a URL with a scheme.
+const BARE_URL = /[a-z][a-z0-9+.-]*:\/\//i;
+
+const FORGED = "\n*Admin tab:* https://evil.example\r\n> *Admin portal:* <https://evil.example|Open> *Email:* ceo@evil.example";
+
+Deno.test("Slack: applicant text cannot forge a field or a link on a pilot application", () => {
+  const cols = [
+    "company_name", "fleet_size", "truck_size", "contact_name", "contact_title", "contact_email",
+    "contact_phone", "fms_provider", "website", "application_notes", "notes",
+  ];
+  const expected = [
+    "*🚛 New pilot application*", "*Admin portal:*", "*Company:*", "*Fleet size:*", "*Truck class:*", "*Contact:*",
+    "*Title:*", "*Email:*", "*Phone:*", "*FMS:*", "*Website:*", "*Applicant notes:*", "*Admin notes:*",
+  ];
+  // The forged text in one column at a time, then in all of them at once.
+  const rows = [
+    ...cols.map((col) => pilotRow({ contact_title: "VP", contact_phone: "555", application_notes: "Hi", notes: "x", [col]: `Acme${FORGED}` })),
+    pilotRow(Object.fromEntries(cols.map((col) => [col, `Acme${FORGED}`]))),
+  ];
+  for (const row of rows) {
+    const text: string = slackMessage(pilotNotice(row)).text;
+    const lines = text.split("\n");
+    assertEquals(slackLabels(text), expected);
+    assertEquals(lines[2], "*Admin portal:* <https://cruzemaps.com/admin>");
+    assertEquals(slackLinks(text), ["<https://cruzemaps.com/admin>"]);
+    // No URL but ours is one Slack would link.
+    assert(!BARE_URL.test(text.replace("<https://cruzemaps.com/admin>", "")));
+    // Past our three lines, a line is a field of ours or a quoted line of notes.
+    for (const l of lines.slice(3)) assert(/^(\*[A-Za-z ]+:\*( |$)|> |>$)/.test(l), l);
+  }
+  // A one-line value stays on its field's line.
+  const one: string = slackMessage(pilotNotice(pilotRow({ contact_title: `VP${FORGED}` }))).text;
+  assert(one.split("\n").some((l) => l.startsWith("*Title:* VP ∗Admin tab:∗ evil.example &gt; ")), one);
+});
+
+Deno.test("Slack: contact and LOI text cannot forge a field or a link either", () => {
+  const contact: string = slackMessage(contactNotice(contactRow({
+    name: `Dana${FORGED}`, email: `d@x.example${FORGED}`, organization: `Acme${FORGED}`, message: `Hello${FORGED}`,
+  }))).text;
+  assertEquals(slackLabels(contact), ["*New contact message*", "*Admin tab:*", "*Name:*", "*Organization:*", "*Email:*", "*Message:*"]);
+  assertEquals(slackLinks(contact), [`<${ADMIN_MESSAGES_URL}>`]);
+  assert(!BARE_URL.test(contact.replace(`<${ADMIN_MESSAGES_URL}>`, "")));
+
+  const loi: string = slackMessage(loiNotice(loiRow({
+    participant_name: `Dana${FORGED}`, participant_company: `Acme${FORGED}`, participant_title: `COO${FORGED}`,
+    fleet_size: `40${FORGED}`, initials: `DL${FORGED}`,
+  }))).text;
+  const link = `<https://cruzemaps.com/loi/${ID}>`;
+  // The signer's name is in bold on line two; nothing in it closes the bold.
+  assertEquals(slackLabels(loi), [
+    "*✍️ LOI signed*", loi.split("\n")[1].match(/^\*[^*]*\*/)![0], "*Signed LOI:*",
+    "*Participant:*", "*Initials:*", "*Company:*", "*Fleet size:*", "*Title:*",
+  ]);
+  assert(loi.split("\n")[1].endsWith("* just signed the Letter of Intent."));
+  assertEquals(loi.split("\n").length, 8);
+  assertEquals(slackLinks(loi), [link]);
+  assert(!BARE_URL.test(loi.replace(link, "")));
+});
+
+// The longest values the notice can be handed: text columns have no length
+// limit, and these characters grow the most when escaped.
+const hugeRow = (ch: string, n = 20000): Row => {
+  const big = ch.repeat(n);
+  return pilotRow({
+    company_name: big, fleet_size: big, truck_size: big, contact_name: big, contact_title: big, contact_email: big,
+    contact_phone: big, fms_provider: big, website: big, application_notes: `${big}\n${big}`, notes: big,
+  });
+};
+
+Deno.test("Slack: the admin link survives however long the applicant's text is", () => {
+  for (const ch of ["x", "&", "<", "*", "\n", "y\n", "😀", FORGED]) {
+    for (const notice of [pilotNotice(hugeRow(ch)), contactNotice(contactRow({ name: ch.repeat(9000), email: ch.repeat(9000), organization: ch.repeat(9000), message: ch.repeat(9000) }))]) {
+      const text: string = slackMessage(notice).text;
+      assert(text.length <= SLACK_MAX_CHARS, `${JSON.stringify(ch)} ${text.length}`);
+      assertEquals(text.split("\n")[2], `*${notice.link.label}:* <${notice.link.url}>`);
+      assertEquals(slackLinks(text), [`<${notice.link.url}>`]);
+      // Nothing was cut blind: every field is still there, the last one included.
+      const last = notice.fields.filter((f) => !f.trusted).at(-1)!.name;
+      assert(text.includes(`\n*${last}:*`), JSON.stringify(ch));
+    }
+  }
+  // A long signer name cannot push the LOI link out either.
+  const loi: string = slackMessage(loiNotice(loiRow({ participant_name: "&".repeat(9000), participant_company: "<".repeat(9000) }))).text;
+  assert(loi.length <= SLACK_MAX_CHARS);
+  assertEquals(loi.split("\n")[2], `*Signed LOI:* <https://cruzemaps.com/loi/${ID}>`);
+});
+
+// What Discord counts toward its 6000-character limit for one embed.
+function embedChars(embed: Row): number {
+  return embed.title.length + embed.description.length + (embed.footer?.text.length ?? 0) +
+    embed.fields.reduce((n: number, f: Row) => n + f.name.length + f.value.length, 0);
+}
+
+Deno.test("Discord: an embed with maximum-length values stays under the 6000-character limit", () => {
+  const notices: Notice[] = [];
+  for (const ch of ["x", "*", "😀", "y\n", FORGED]) {
+    notices.push(pilotNotice(hugeRow(ch)));
+    notices.push(loiNotice(loiRow({
+      participant_name: ch.repeat(9000), participant_company: ch.repeat(9000), participant_title: ch.repeat(9000),
+      fleet_size: ch.repeat(9000), initials: ch.repeat(9000),
+    })));
+    notices.push(contactNotice(contactRow({ name: ch.repeat(9000), email: ch.repeat(9000), organization: ch.repeat(9000), message: ch.repeat(9000) })));
+  }
+  for (const notice of notices) {
+    const embed = discordMessage(notice).embeds[0];
+    assert(embedChars(embed) <= DISCORD_EMBED_MAX_CHARS, `${notice.title} ${embedChars(embed)}`);
+    assert(embed.description.length <= 4096);
+    for (const f of embed.fields) {
+      assert(f.value.length >= 1 && f.value.length <= 1024, f.name);
+      // No cut ends on half an escape or half a surrogate pair.
+      assert(!/(?<!\\)(\\\\)*\\…$/.test(f.value), f.name);
+      assert(!/[\ud800-\udbff]…$/.test(f.value), f.name);
+    }
+    assertEquals(embed.url, notice.link.url);
+  }
+});
+
+Deno.test("Discord: notes are shortened first, and a normal application is not shortened at all", () => {
+  // The reviewer's case: every field full, which used to come to 6,399 characters.
+  const embed = pilotEmbed(hugeRow("x", 1024)).embeds[0];
+  const len = (name: string) => embed.fields.find((f: Row) => f.name === name).value.length;
+  assert(embedChars(embed) <= DISCORD_EMBED_MAX_CHARS);
+  assert(len("Applicant notes") < PILOT_APPLICANT_NOTES_CHARS);
+  assert(len("Admin notes") < 1024);
+  assert(len("Applicant notes") >= 200 && len("Admin notes") >= 200);
+  assertEquals(len("Title"), PILOT_TITLE_CHARS);
+  assertEquals(len("Phone"), PILOT_PHONE_CHARS);
+
+  // Long notes alone fit, so nothing is cut below its own cap.
+  const notes = "n".repeat(900);
+  const normal = pilotEmbed(pilotRow({ application_notes: notes, notes: "Call Tue" })).embeds[0];
+  assertEquals(normal.fields.find((f: Row) => f.name === "Applicant notes").value, notes);
+  assertEquals(normal.fields.find((f: Row) => f.name === "Company").value, "Acme Freight");
+});
+
+Deno.test("line breaks in a one-line value are collapsed; notes keep theirs", () => {
+  const embed = pilotEmbed(pilotRow({ contact_title: "VP\r\n\n Ops", application_notes: "a\r\nb\n\n\n\nc" })).embeds[0];
+  const value = (name: string) => embed.fields.find((f: Row) => f.name === name).value;
+  assertEquals(value("Title"), "VP Ops");
+  assertEquals(value("Applicant notes"), "a\nb\n\nc");
 });

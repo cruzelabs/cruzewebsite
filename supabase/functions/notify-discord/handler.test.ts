@@ -549,7 +549,7 @@ Deno.test("Slack: a desktop notification, which reads the blocks' text fields, s
       company_name: SPOOF, fleet_size: SPOOF, truck_size: SPOOF, contact_name: SPOOF, contact_title: SPOOF, contact_email: SPOOF,
       contact_phone: SPOOF, fms_provider: SPOOF, website: SPOOF, application_notes: `${SPOOF}\n${SPOOF}`, notes: SPOOF,
     })),
-    // Codex's case: a forged instruction as the LOI signer's name.
+    // The reviewer's case: a forged instruction as the LOI signer's name.
     loiNotice(loiRow({ participant_name: SPOOF, participant_company: SPOOF, participant_title: SPOOF, fleet_size: SPOOF, initials: SPOOF })),
     contactNotice(contactRow({ name: SPOOF, email: SPOOF, organization: SPOOF, message: `${SPOOF}\n${SPOOF}` })),
   ];

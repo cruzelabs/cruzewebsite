@@ -21,12 +21,37 @@
 //     confirmation is the email for "pending".
 //   - The recipient is the row's contact_email, else the applicant's profile
 //     or sign-in email, looked up by the row's user_id.
+//   - The approval email says the reader will sign in to the Client Portal
+//     "with the account you used to apply" only when the recipient is the
+//     email of the account that applied (compared trimmed and
+//     case-insensitive, as accept_invitation does in migration 022).
+//     contact_email is the Work email on /apply: it starts as the account's
+//     email, but the applicant can change it to a colleague's, and that
+//     colleague has no access to the account. Otherwise, and when the
+//     account's email cannot be read, the email says to sign in with the
+//     account that applied, or to ask the person who applied for an invite.
+//     The sign-in line names no address. The account's email is not on the
+//     application row, so it is only compared. It shows in an email only
+//     when the row has no contact_email and the email goes to it.
 //   - The status email carries fleet_visible_message as "Message from Cruze"
 //     only when the row has a reviewed_by, which the admin portal sets when a
 //     staff member saves the message. Applicants cannot write either column
 //     (migration 025), so text an applicant typed is never sent as ours.
+//   - An email names a signed LOI only when one is on file for the
+//     application when the email is built: a loi_signatures row with this
+//     pilot_application_id and the applicant's user_id. /apply inserts the
+//     LOI in a second request after the pilot row (src/pages/Apply.tsx) and
+//     takes the pilot row back if signing fails, and an applicant can insert a
+//     pilot row with no LOI, so the insert webhook can get here before any
+//     LOI exists. Without one the confirmation says "your application" and
+//     nothing about an LOI. A failed lookup counts as no LOI.
+//     Not closed here: the confirmation can go out for a pilot row that /apply
+//     takes back a moment later because signing failed (the applicant is told
+//     on screen to try again). That email names no LOI. One way to stop it:
+//     the wizard writes both rows in one transaction, so the webhook, which
+//     is sent after commit, only ever sees a signed application.
 
-import { renderPilotStatusEmail, renderPilotSubmittedEmail } from "./template.ts";
+import { namesSignedLoi, namesSignInAccount, renderPilotStatusEmail, renderPilotSubmittedEmail } from "./template.ts";
 
 export const TABLE = "pilot_applications";
 
@@ -72,10 +97,14 @@ export interface Deps {
   // on a query failure; `row` is null when no row has that id.
   loadRow(id: string): Promise<{ row: Row | null; error?: string }>;
   // The applicant's email from profiles, then from auth.users. null when
-  // neither has one.
+  // neither has one. The recipient when the row has no contact_email; for the
+  // approval email, also compared with the recipient (isAccountEmail).
   lookupEmail(userId: string): Promise<{ email: string | null; error?: string }>;
   // Record that `key` was emailed. "duplicate" when it already was.
   claim(key: string): Promise<ClaimResult>;
+  // Whether loi_signatures has a row for this application signed by this
+  // user. `error` is set on a query failure.
+  hasSignedLoi(applicationId: string, userId: string): Promise<{ signed: boolean; error?: string }>;
   sendEmail(apiKey: string, email: Email): Promise<SendResult>;
 }
 
@@ -132,21 +161,35 @@ export async function handle(req: Request, deps: Deps): Promise<Response> {
   }
   if (!recipient.email) return json({ skipped: "no recipient email" });
 
+  // Only for an email whose copy can say the reader applied. With no
+  // contact_email the recipient already is the account's email. Read before
+  // the claim: unlike the LOI, the answer is not moments away, and a read
+  // that hangs then leaves nothing recorded, so a later webhook can still
+  // send the email.
+  const toAccountEmail = namesSignInAccount(status) &&
+    (recipient.account === true || await isAccountEmail(row, recipient.email, deps));
+
   const claim = await deps.claim(ledgerKey(row.id, status));
   if (claim === "duplicate") return json({ skipped: "already emailed" });
   if (claim === "error") return json({ error: "could not record the email" }, 500);
+
+  // Only for an email whose copy can name the LOI, and read as late as
+  // possible: on INSERT the LOI row may be only moments away.
+  const loiSigned = namesSignedLoi(status) && await signedLoiOnFile(row, deps);
 
   const site = deps.env("SITE_BASE_URL") || DEFAULT_SITE;
   const dashboardUrl = `${site}/fleet-dashboard`;
   const companyName = row.company_name || "your fleet";
   const mail = event === "INSERT"
-    ? renderPilotSubmittedEmail({ email: recipient.email, companyName, dashboardUrl })
+    ? renderPilotSubmittedEmail({ email: recipient.email, companyName, dashboardUrl, loiSigned })
     : renderPilotStatusEmail({
       email: recipient.email,
       companyName,
       status,
       dashboardUrl,
       fleetMessage: staffMessage(row),
+      loiSigned,
+      toAccountEmail,
     });
 
   const res = await deps.sendEmail(apiKey, {
@@ -171,6 +214,54 @@ export function staffMessage(row: Row): string | null {
   return message || null;
 }
 
+// True only when the applicant's signed LOI for this application is on file
+// right now. The email is already claimed when this runs, so a lookup that
+// fails or throws must not stop it: it counts as no LOI, and the email then
+// says only what is true of every application.
+export async function signedLoiOnFile(row: Row, deps: Deps): Promise<boolean> {
+  if (typeof row.id !== "string" || typeof row.user_id !== "string" || !row.user_id) return false;
+  try {
+    const found = await deps.hasSignedLoi(row.id, row.user_id);
+    if (found.error) {
+      console.error(`send-pilot-email: could not look up the LOI for ${TABLE} ${row.id}: ${found.error}`);
+      return false;
+    }
+    return found.signed === true;
+  } catch (err) {
+    console.error(`send-pilot-email: LOI lookup for ${TABLE} ${row.id} threw: ${err instanceof Error ? err.message : err}`);
+    return false;
+  }
+}
+
+// True only when `to` is the email of the account that applied, so the email
+// can say "the account you used to apply". The address is only compared,
+// never put in the email. A lookup that fails or throws must not stop the
+// email: it counts as another address, and the email then says what is true
+// for any recipient.
+export async function isAccountEmail(row: Row, to: string, deps: Deps): Promise<boolean> {
+  if (typeof row.user_id !== "string" || !row.user_id) return false;
+  try {
+    const found = await deps.lookupEmail(row.user_id);
+    if (found.error) {
+      console.error(`send-pilot-email: could not look up the account email for ${TABLE} ${row.id}: ${found.error}`);
+      return false;
+    }
+    return sameAddress(found.email, to);
+  } catch (err) {
+    console.error(`send-pilot-email: account email lookup for ${TABLE} ${row.id} threw: ${err instanceof Error ? err.message : err}`);
+    return false;
+  }
+}
+
+// Two email addresses are the same when they match trimmed and ignoring case,
+// as in accept_invitation (migration 022). A missing or blank one matches
+// nothing.
+export function sameAddress(a: unknown, b: unknown): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const x = a.trim().toLowerCase();
+  return x !== "" && x === b.trim().toLowerCase();
+}
+
 export function ledgerKey(id: string, status: string): string {
   return `${TABLE}:${id}:${status}`;
 }
@@ -184,14 +275,16 @@ export function within(ts: unknown, now: Date, pastMs: number, futureMs: number)
   return age <= pastMs && age >= -futureMs;
 }
 
-async function recipientFor(row: Row, deps: Deps): Promise<{ email: string | null; error?: string }> {
+// `account` is true when the address is the applicant's account email, which
+// is used only when the row has no contact_email.
+async function recipientFor(row: Row, deps: Deps): Promise<{ email: string | null; account?: boolean; error?: string }> {
   const contact = typeof row.contact_email === "string" ? row.contact_email.trim() : "";
   if (contact) return { email: contact };
   if (typeof row.user_id !== "string" || !row.user_id) return { email: null };
   const found = await deps.lookupEmail(row.user_id);
   if (found.error) return found;
   const email = typeof found.email === "string" ? found.email.trim() : "";
-  return { email: email || null };
+  return email ? { email, account: true } : { email: null };
 }
 
 // The key the function reads rows with: a secret key (sb_secret_...) when one

@@ -529,14 +529,23 @@ Deno.test("the account's email is read before the email is recorded, so a read t
 Deno.test("no email says the reader applied unless the caller says it goes to the account's email", () => {
   const vars = { email: "ops@acme.example", companyName: "Acme Freight", dashboardUrl: "https://cruzemaps.com/fleet-dashboard" };
   const statuses = ["pending", "in_review", "approved", "onboarding", "active", "denied", "archived", "something_new"];
-  // toAccountEmail left out (a caller from before the field), false, or not a boolean.
+  // toAccountEmail left out (a caller from before the field), false, or not a
+  // boolean, with or without a signed LOI: the LOI copy wins over the
+  // account copy, so it must not say the reader applied either.
   for (const toAccountEmail of [undefined, false, null, "yes", 1] as unknown as (boolean | undefined)[]) {
-    for (const status of statuses) {
-      const mail = renderPilotStatusEmail({ ...vars, status, toAccountEmail });
-      assert(!mail.html.includes("you used to apply"), `${status} ${toAccountEmail}`);
-      assert(!mail.text.includes("you used to apply"), `${status} ${toAccountEmail}`);
+    for (const loiSigned of [undefined, true]) {
+      for (const status of statuses) {
+        const mail = renderPilotStatusEmail({ ...vars, status, toAccountEmail, loiSigned });
+        assert(!mail.html.includes("you used to apply"), `${status} ${toAccountEmail} ${loiSigned}`);
+        assert(!mail.text.includes("you used to apply"), `${status} ${toAccountEmail} ${loiSigned}`);
+      }
+      assertEquals(bodyText(renderPilotStatusEmail({ ...vars, status: "approved", toAccountEmail, loiSigned })), APPROVED_TO_OTHER);
     }
-    assertEquals(bodyText(renderPilotStatusEmail({ ...vars, status: "approved", toAccountEmail })), APPROVED_TO_OTHER);
+  }
+  // The confirmation goes to the Work email too, and never says it.
+  for (const loiSigned of [undefined, true]) {
+    const mail = renderPilotSubmittedEmail({ ...vars, loiSigned });
+    assert(!mail.html.includes("you used to apply") && !mail.text.includes("you used to apply"), String(loiSigned));
   }
   // Set, it changes the approval email's sign-in line and nothing else.
   for (const status of statuses) {

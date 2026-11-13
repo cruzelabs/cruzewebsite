@@ -30,8 +30,9 @@
 //     colleague has no access to the account. Otherwise, and when the
 //     account's email cannot be read, the email says to sign in with the
 //     account that applied, or to ask the person who applied for an invite.
-//     It never prints the account's email: that address is not on the
-//     application row, and the recipient may not know it.
+//     The sign-in line names no address. The account's email is not on the
+//     application row, so it is only compared. It shows in an email only
+//     when the row has no contact_email and the email goes to it.
 //   - The status email carries fleet_visible_message as "Message from Cruze"
 //     only when the row has a reviewed_by, which the admin portal sets when a
 //     staff member saves the message. Applicants cannot write either column

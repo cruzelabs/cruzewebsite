@@ -6,7 +6,7 @@
 // CI runs this in the "edge functions" job of .github/workflows/test.yml.
 
 import { assert, assertEquals } from "jsr:@std/assert@1.0.13";
-import { type Deps, type Email, handle, ledgerKey, type Row, serviceKey } from "./handler.ts";
+import { type Deps, type Email, handle, ledgerKey, type Row, sameAddress, serviceKey } from "./handler.ts";
 import { CLIENT_PORTAL_URL, renderPilotStatusEmail, renderPilotSubmittedEmail } from "./template.ts";
 
 const NOW = new Date("2026-10-22T12:00:00Z");
@@ -52,6 +52,7 @@ function fake(opts: {
   profileEmail?: string | null;
   loadError?: string;
   lookupError?: string;
+  lookupThrows?: boolean;
   claimError?: boolean;
   loiError?: string;
   loiThrows?: boolean;
@@ -75,6 +76,7 @@ function fake(opts: {
     },
     lookupEmail(userId) {
       d.lookups.push(userId);
+      if (opts.lookupThrows) return Promise.reject(new Error("connection reset"));
       if (opts.lookupError) return Promise.resolve({ email: null, error: opts.lookupError });
       return Promise.resolve({ email: opts.profileEmail ?? null });
     },
@@ -373,21 +375,182 @@ Deno.test("serviceKey prefers a secret key over the legacy service_role key", ()
   assertEquals(serviceKey(env({})), undefined);
 });
 
-Deno.test("the approval email says where to sign in, as a link and in plain text", async () => {
-  const d = fake({ rows: [pilotRow()] });
+// The approval email's sign-in line when it goes to the email of the account
+// that applied, and when it does not (or that cannot be told).
+const ACCOUNT_LINE = "where you will sign in with the account you used to apply.";
+const OTHER_LINE =
+  "where you will sign in with the account that applied for the pilot. If that account is not yours, ask the person who applied to invite you.";
+const APPROVED_TO_ACCOUNT =
+  `Welcome aboard. Next, our team sets up your fleet's portal at ${CLIENT_PORTAL_URL}, ${ACCOUNT_LINE} Check your fleet dashboard for kickoff details and next steps from our team.`;
+const APPROVED_TO_OTHER =
+  `Welcome aboard. Next, our team sets up your fleet's portal at ${CLIENT_PORTAL_URL}, ${OTHER_LINE} Check your fleet dashboard for kickoff details and next steps from our team.`;
+// The status copy in the plain-text email: the line after the headline.
+const bodyText = (mail: { text: string }) => mail.text.split("\n")[2];
+
+Deno.test("the approval email to the account that applied says where to sign in, as a link and in plain text", async () => {
+  // The Work email on /apply starts as the account's email.
+  const d = fake({ rows: [pilotRow()], profileEmail: "dana@acme.example" });
   await call(d, insertPayload());
   review(d, "approved");
   assertEquals((await call(d, updatePayload())).body.ok, true);
   const mail = d.sent[1];
+  assertEquals(mail.to, ["dana@acme.example"]);
+  assertEquals(d.lookups, [USER]);
   assertEquals(CLIENT_PORTAL_URL, "https://client.cruzemaps.com");
   assert(mail.html.includes(`sets up your fleet's portal at <a href="${CLIENT_PORTAL_URL}"`));
   assert(mail.html.includes("where you will sign in with the account you used to apply"));
-  assert(mail.text.includes(`portal at ${CLIENT_PORTAL_URL}, where you will sign in with the account you used to apply.`));
+  // Word for word what every approval email said before.
+  assertEquals(bodyText(mail), APPROVED_TO_ACCOUNT);
+  assert(!mail.html.includes(OTHER_LINE));
   assert(!mail.text.includes("<a"));
   // The fleet dashboard button stays.
   assert(mail.html.includes('href="https://cruzemaps.com/fleet-dashboard"'));
   // The confirmation sent at apply time does not point at the portal yet.
   assert(!JSON.stringify(d.sent[0]).includes("client.cruzemaps.com"));
+});
+
+Deno.test("an approval email to a Work email that is not the account's says to sign in with the account that applied or ask for an invite, and names no address", async () => {
+  // owner@acme.example applied and typed ops@acme.example as the Work email.
+  const d = fake({ rows: [pilotRow({ contact_email: "ops@acme.example" })], profileEmail: "owner@acme.example" });
+  await call(d, insertPayload());
+  review(d, "approved");
+  // The payload cannot make the recipient the account's email.
+  assertEquals((await call(d, updatePayload({ id: ID, contact_email: "owner@acme.example" }))).body.ok, true);
+  const mail = d.sent[1];
+  assertEquals(mail.to, ["ops@acme.example"]);
+  assertEquals(mail.subject, "Your Cruze pilot application was approved");
+  assertEquals(d.lookups, [USER]);
+  assertEquals(bodyText(mail), APPROVED_TO_OTHER);
+  assert(mail.html.includes(`sets up your fleet's portal at <a href="${CLIENT_PORTAL_URL}"`));
+  assert(mail.html.includes(OTHER_LINE));
+  assert(!mail.html.includes("you used to apply"));
+  assert(!mail.text.includes("you used to apply"));
+  // The account's email is not on the application row, so it is not printed.
+  assert(!JSON.stringify(mail).includes("owner@acme.example"));
+  assert(!bodyText(mail).includes("@"));
+});
+
+Deno.test("without the account's email to compare, the approval email falls back to wording that names no address", async () => {
+  const cases: [string, Parameters<typeof fake>[0], number][] = [
+    ["no account email", { profileEmail: null }, 1],
+    ["a blank account email", { profileEmail: "   " }, 1],
+    ["a failed lookup", { lookupError: "permission denied" }, 1],
+    ["a lookup that throws", { lookupThrows: true }, 1],
+    // No applicant account on the row: nothing to look up.
+    ["no user_id", { rows: [pilotRow({ user_id: null })], profileEmail: "dana@acme.example" }, 0],
+  ];
+  for (const [name, opts, reads] of cases) {
+    const d = fake({ rows: [pilotRow()], ...opts });
+    review(d, "approved");
+    const { status, body } = await call(d, updatePayload());
+    assertEquals(status, 200, name);
+    assertEquals(body, { ok: true, id: "email-1", event: "UPDATE" }, name);
+    assertEquals(d.lookups.length, reads, name);
+    const mail = d.sent[0];
+    assertEquals(mail.to, ["dana@acme.example"], name);
+    assertEquals(bodyText(mail), APPROVED_TO_OTHER, name);
+    assert(mail.html.includes(OTHER_LINE), name);
+    assert(!mail.html.includes("you used to apply"), name);
+    assert(!bodyText(mail).includes("@"), name);
+    assertEquals([...d.ledger], [ledgerKey(ID, "approved")], name);
+  }
+});
+
+Deno.test("the Work email is the account's email whatever its case or surrounding spaces", async () => {
+  const d = fake({ rows: [pilotRow({ contact_email: "  Dana@ACME.example " })], profileEmail: " dana@acme.example" });
+  review(d, "approved");
+  assertEquals((await call(d, updatePayload())).body.ok, true);
+  assertEquals(d.sent[0].to, ["Dana@ACME.example"]);
+  assertEquals(bodyText(d.sent[0]), APPROVED_TO_ACCOUNT);
+});
+
+Deno.test("sameAddress ignores case and surrounding spaces, and a blank address matches nothing", () => {
+  assert(sameAddress("Dana@Acme.example", " dana@acme.EXAMPLE "));
+  assert(!sameAddress("dana@acme.example", "ops@acme.example"));
+  assert(!sameAddress("dana+pilot@acme.example", "dana@acme.example"));
+  for (const blank of ["", "  ", null, undefined, 42]) {
+    assert(!sameAddress(blank, blank), String(blank));
+    assert(!sameAddress(blank, "dana@acme.example"), String(blank));
+    assert(!sameAddress("dana@acme.example", blank), String(blank));
+  }
+});
+
+Deno.test("with no Work email the approval email goes to the account's email and says so, with one lookup", async () => {
+  const d = fake({ rows: [pilotRow({ contact_email: null })], profileEmail: "owner@acme.example" });
+  review(d, "approved");
+  assertEquals((await call(d, updatePayload())).body.ok, true);
+  assertEquals(d.sent[0].to, ["owner@acme.example"]);
+  assertEquals(bodyText(d.sent[0]), APPROVED_TO_ACCOUNT);
+  // The recipient already is the account's email: nothing more to read.
+  assertEquals(d.lookups, [USER]);
+});
+
+Deno.test("the account's email is read only for an approval email that is due", async () => {
+  const d = fake({ rows: [pilotRow()], profileEmail: "dana@acme.example" });
+  await call(d, insertPayload());
+  for (const status of ["in_review", "onboarding", "active", "denied", "archived"]) {
+    review(d, status);
+    assertEquals((await call(d, updatePayload())).body.ok, true, status);
+  }
+  assertEquals(d.lookups.length, 0);
+  // A review older than 10 minutes sends nothing and reads nothing.
+  review(d, "approved", 11);
+  assertEquals((await call(d, updatePayload())).body, { skipped: "no recent status change" });
+  assertEquals(d.lookups.length, 0);
+  review(d, "approved");
+  assertEquals((await call(d, updatePayload())).body.ok, true);
+  assertEquals(d.lookups, [USER]);
+  // A replay reads again, since the read comes before the claim, and sends nothing.
+  assertEquals((await call(d, updatePayload())).body, { skipped: "already emailed" });
+  assertEquals(d.lookups, [USER, USER]);
+  assertEquals(d.sent.length, 7);
+});
+
+Deno.test("the account's email is read before the email is recorded, so a read that hangs records nothing", async () => {
+  const d = fake({ rows: [pilotRow()] });
+  review(d, "approved");
+  let release: (found: { email: string | null }) => void = () => {};
+  d.lookupEmail = (userId) => {
+    d.lookups.push(userId);
+    return new Promise((resolve) => (release = resolve));
+  };
+  const pending = call(d, updatePayload());
+  for (let i = 0; i < 50 && d.lookups.length === 0; i++) await new Promise((r) => setTimeout(r, 0));
+  assertEquals(d.lookups, [USER]);
+  // Were the function to die here, nothing is recorded, so a later webhook can still send.
+  assertEquals(d.ledger.size, 0);
+  assertEquals(d.sent.length, 0);
+  release({ email: "dana@acme.example" });
+  assertEquals((await pending).body.ok, true);
+  assertEquals([...d.ledger], [ledgerKey(ID, "approved")]);
+  assertEquals(bodyText(d.sent[0]), APPROVED_TO_ACCOUNT);
+});
+
+Deno.test("no email says the reader applied unless the caller says it goes to the account's email", () => {
+  const vars = { email: "ops@acme.example", companyName: "Acme Freight", dashboardUrl: "https://cruzemaps.com/fleet-dashboard" };
+  const statuses = ["pending", "in_review", "approved", "onboarding", "active", "denied", "archived", "something_new"];
+  // toAccountEmail left out (a caller from before the field), false, or not a boolean.
+  for (const toAccountEmail of [undefined, false, null, "yes", 1] as unknown as (boolean | undefined)[]) {
+    for (const status of statuses) {
+      const mail = renderPilotStatusEmail({ ...vars, status, toAccountEmail });
+      assert(!mail.html.includes("you used to apply"), `${status} ${toAccountEmail}`);
+      assert(!mail.text.includes("you used to apply"), `${status} ${toAccountEmail}`);
+    }
+    assertEquals(bodyText(renderPilotStatusEmail({ ...vars, status: "approved", toAccountEmail })), APPROVED_TO_OTHER);
+  }
+  // Set, it changes the approval email's sign-in line and nothing else.
+  for (const status of statuses) {
+    const plain = renderPilotStatusEmail({ ...vars, status });
+    const toAccount = renderPilotStatusEmail({ ...vars, status, toAccountEmail: true });
+    if (status !== "approved") assertEquals(toAccount, plain, status);
+  }
+  const approved = renderPilotStatusEmail({ ...vars, status: "approved", toAccountEmail: true });
+  assertEquals(bodyText(approved), APPROVED_TO_ACCOUNT);
+  assert(approved.html.includes(`<a href="${CLIENT_PORTAL_URL}"`));
+  // The approval copy names no LOI, whoever it goes to.
+  for (const toAccountEmail of [true, false]) {
+    assert(!namesLoi(renderPilotStatusEmail({ ...vars, status: "approved", toAccountEmail, loiSigned: true })));
+  }
 });
 
 Deno.test("only the approval email points at the Client Portal", () => {

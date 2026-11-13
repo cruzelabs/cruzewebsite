@@ -26,23 +26,33 @@ const SITE = "https://cruzemaps.com";
 // The Client Portal, where an approved fleet runs its pilot. The link text is
 // the full URL so the plain-text email keeps it when the tags are stripped.
 export const CLIENT_PORTAL_URL = "https://client.cruzemaps.com";
+const PORTAL_LINK = `<a href="${CLIENT_PORTAL_URL}" style="color:${BRAND.orange};">${CLIENT_PORTAL_URL}</a>`;
 
-// `body` must be true of every application, so it never names an LOI.
-// `bodyWithLoi` is used in its place only when the caller found a signed LOI
-// on file for the application (handler.ts, hasSignedLoi). /apply signs the
-// LOI in a second request after the pilot row is in, and a pilot row can be
-// inserted with no LOI at all, so an email sent off the pilot row cannot take
-// the LOI for granted.
+// `body` must be true of every application and every recipient, so it never
+// names an LOI and never assumes the recipient applied. A variant is used in
+// its place only when the caller has checked:
+//   - `bodyWithLoi` when a signed LOI is on file for the application
+//     (handler.ts, hasSignedLoi). /apply signs the LOI in a second request
+//     after the pilot row is in, and a pilot row can be inserted with no LOI
+//     at all, so an email sent off the pilot row cannot take the LOI for
+//     granted.
+//   - `bodyToAccount` when the email goes to the email address of the account
+//     that applied (handler.ts, isAccountEmail). The email goes to the row's
+//     contact_email, the Work email on /apply, which the applicant can change
+//     to a colleague's address.
+// No status has both.
 interface StatusCopy {
   subject: string;
   headline: string;
   body: string;
   bodyWithLoi?: string;
+  bodyToAccount?: string;
   accent: string;
   accentBar: string;
 }
 
-const bodyFor = (copy: StatusCopy, loiSigned?: boolean) => (loiSigned === true && copy.bodyWithLoi) || copy.body;
+const bodyFor = (copy: StatusCopy, vars: { loiSigned?: boolean; toAccountEmail?: boolean }) =>
+  (vars.loiSigned === true && copy.bodyWithLoi) || (vars.toAccountEmail === true && copy.bodyToAccount) || copy.body;
 
 const STATUS_COPY: Record<string, StatusCopy> = {
   pending: {
@@ -63,7 +73,10 @@ const STATUS_COPY: Record<string, StatusCopy> = {
   approved: {
     subject: "Your Cruze pilot application was approved",
     headline: "You're approved for the pilot",
-    body: `Welcome aboard. Next, our team sets up your fleet's portal at <a href="${CLIENT_PORTAL_URL}" style="color:${BRAND.orange};">${CLIENT_PORTAL_URL}</a>, where you will sign in with the account you used to apply. Check your fleet dashboard for kickoff details and next steps from our team.`,
+    // Names no email address: the account's address is not on the
+    // application row, and the recipient may not know it.
+    body: `Welcome aboard. Next, our team sets up your fleet's portal at ${PORTAL_LINK}, where you will sign in with the account that applied for the pilot. If that account is not yours, ask the person who applied to invite you. Check your fleet dashboard for kickoff details and next steps from our team.`,
+    bodyToAccount: `Welcome aboard. Next, our team sets up your fleet's portal at ${PORTAL_LINK}, where you will sign in with the account you used to apply. Check your fleet dashboard for kickoff details and next steps from our team.`,
     accent: BRAND.orange,
     accentBar: BRAND.orangeBright,
   },
@@ -103,6 +116,11 @@ const STATUS_COPY: Record<string, StatusCopy> = {
 // confirmation is the email for "pending".
 export const namesSignedLoi = (status: string): boolean => Boolean(STATUS_COPY[status]?.bodyWithLoi);
 
+// Whether the email for `status` has copy that tells the reader they applied
+// ("the account you used to apply"), so the caller compares the recipient
+// with the account's email only when the answer changes the email.
+export const namesSignInAccount = (status: string): boolean => Boolean(STATUS_COPY[status]?.bodyToAccount);
+
 export function renderPilotSubmittedEmail(vars: {
   email: string;
   companyName: string;
@@ -126,7 +144,7 @@ export function renderPilotSubmittedEmail(vars: {
     preheader: `Application received for ${vars.companyName}.`,
     eyebrow: "Pilot application",
     headline: copy.headline,
-    body: `${bodyFor(copy, vars.loiSigned)}${vars.companyName ? ` (${escapeHtml(vars.companyName)})` : ""}`,
+    body: `${bodyFor(copy, { loiSigned: vars.loiSigned })}${vars.companyName ? ` (${escapeHtml(vars.companyName)})` : ""}`,
     ctaUrl: vars.dashboardUrl,
     ctaLabel,
     accent: copy.accent,
@@ -144,6 +162,11 @@ export function renderPilotStatusEmail(vars: {
   fleetMessage?: string | null;
   // As in renderPilotSubmittedEmail.
   loiSigned?: boolean;
+  // True only when `email` is the email address of the account that applied.
+  // Left out or false, the approval email does not say the reader applied:
+  // it says to sign in with the account that applied, or to ask the person
+  // who applied for an invite.
+  toAccountEmail?: boolean;
 }): { subject: string; html: string; text: string } {
   const copy: StatusCopy = STATUS_COPY[vars.status] ?? {
     subject: "Update on your Cruze pilot application",
@@ -168,7 +191,7 @@ export function renderPilotStatusEmail(vars: {
     preheader: copy.headline,
     eyebrow: "Pilot application",
     headline: copy.headline,
-    body: bodyFor(copy, vars.loiSigned),
+    body: bodyFor(copy, { loiSigned: vars.loiSigned, toAccountEmail: vars.toAccountEmail }),
     ctaUrl: vars.dashboardUrl,
     ctaLabel: "Open fleet dashboard",
     accent: copy.accent,

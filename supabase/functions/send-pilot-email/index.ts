@@ -8,8 +8,10 @@
 // The payload is not trusted beyond type, table and record.id: the row is read
 // back from the database with the service role and the email is built from
 // that. Each application gets at most one email per status. An email names a
-// signed LOI only when loi_signatures has one for the application. Rules live
-// in handler.ts; tests in handler.test.ts; the email copy in template.ts.
+// signed LOI only when loi_signatures has one for the application. The
+// approval email says "the account you used to apply" only when it goes to
+// that account's email. Rules live in handler.ts; tests in handler.test.ts;
+// the email copy in template.ts.
 //
 // Secrets (Supabase dashboard, Edge Function Secrets):
 //   - RESEND_API_KEY        (without it the function sends nothing)

@@ -28,10 +28,14 @@
 //     automatic linking of URLs, bare domains, emails and channel names, and
 //     the row text is escaped (&, < and >) so it cannot write a <link> or a
 //     <!channel> mention by hand. Row text cannot start a block, a line or turn
-//     bold, so it cannot pose as a field. The admin link is an explicit
-//     <url|text> link in a block of its own that holds no row text, and the
-//     plain `text` fallback (what Slack shows in notifications) holds only
-//     our title and that link
+//     bold, so it cannot pose as a field
+//   - a Slack notification shows only our text. The first block is ours alone
+//     (the notice kind, our description and the admin link, an explicit
+//     <url|text> link) and is the only block with a top-level text field,
+//     which is what Slack's desktop notification reads. Row text follows in
+//     context blocks, which have no such field. The plain `text` fallback
+//     (what Slack's mobile notification reads) holds only our title and the
+//     link. See slackMessage()
 
 export const TABLES = ["pilot_applications", "loi_signatures", "contact_messages"] as const;
 export type Table = (typeof TABLES)[number];
@@ -430,30 +434,54 @@ function fixedValue(f: NoticeField): string {
 
 // The same notice as a Slack incoming-webhook message, in Block Kit.
 //
-//   - blocks: a header with our title, a line with our description (and, for
-//     an LOI, the signer's name in bold), a block with the admin link, then
-//     one block per field. Every block that holds row text is mrkdwn with
-//     verbatim: true: Slack's docs say that skips its automatic linking of
-//     URLs, bare domains, emails and channel names, while an explicit link
-//     written by hand would still work, which slackPlain() rules out by
-//     escaping < and >. So the only link in the blocks is ours.
-//   - the admin link is an explicit <url|text> link in a block that holds only
-//     our text, so no row text and no cut can reach it
+// What a Slack notification shows. Since 2026-07-13 the desktop client takes
+// the text from the blocks, not from `text`:
+//   "When displaying desktop notifications, Slack will extract text from the
+//   top-level text field of blocks first. If no text can be extracted, the
+//   message.text value will be used for the notification. Mobile
+//   notifications exclusively use message.text."
+//   https://docs.slack.dev/messaging/formatting-message-text/ (under "Adding
+//   your blocks array"). The change was announced in
+//   https://docs.slack.dev/changelog/2026/07/13/notification-changes/, which
+//   says only that desktop notifications "now pull text from blocks first".
+// Neither page names the block that feeds the notification or says that only
+// the first one is read (both read 2026-11-13). So no block may hold row text
+// in its top-level text field (a section and a header have one; a context
+// block has only `elements`):
+//
+//   - blocks[0] is a section whose text is ours alone: the title (the notice
+//     kind), our description and the admin link, an explicit <url|text> link.
+//     It comes first and it is the only block with a top-level text field, so
+//     it is the desktop notification however many blocks Slack reads. No row
+//     text and no cut can reach it
+//   - everything from the row follows in context blocks, one per field, and
+//     for an LOI the line with the signer's name. Each holds one mrkdwn text
+//     object with verbatim: true: Slack's docs say that skips its automatic
+//     linking of URLs, bare domains, emails and channel names, while an
+//     explicit link written by hand would still work, which slackPlain()
+//     rules out by escaping < and >. So the only link in the blocks is ours
 //   - row text cannot start a block, a line or turn bold, so it cannot pose
 //     as a field: a one-line value has its line breaks collapsed, a multi-line
 //     value is quoted, every line behind "> ", and slackPlain() swaps the
 //     formatting characters for look-alikes
-//   - text: the fallback Slack shows in notifications and where blocks are
-//     not shown. It is mrkdwn that Slack links on its own, so it carries only
-//     our title and the admin link, never row text
+//   - text: what the mobile notification shows, and what Slack shows where
+//     blocks are not. It is mrkdwn that Slack links on its own, so it carries
+//     only our title and the admin link, never row text
 //   - row text is shortened first when the blocks together would pass 3000
 //     characters
+//
+// Not promised by Slack's docs: that text nested in a block (`elements`) is
+// never read for a notification. If a client did read it, row text could only
+// follow our first block there, never come before it.
 export function slackMessage(n: Notice): Row {
   const subject = oneLine(n.subject);
-  const intro = subject ? `*${cutSlack(slackPlain(subject), SUBJECT_CHARS)}* ${n.description}` : n.description;
   const link = `*${n.link.label}:* <${n.link.url}|${n.link.url.replace(/^https:\/\//, "")}>`;
+  // Our own text. A description that continues the subject ("<name> just
+  // signed ...") is row text's sentence, so it goes below with the subject.
+  const head = [`*${n.title}*`, ...(subject ? [] : [n.description]), link].join("\n");
+  const intro = subject ? `*${cutSlack(slackPlain(subject), SUBJECT_CHARS)}* ${n.description}` : "";
 
-  // The link has a block of its own; a field that repeats it is dropped.
+  // The link is in the first block; a field that repeats it is dropped.
   const fields = n.fields.filter((f) => !(f.trusted && f.value === n.link.url));
   const sized: (Sized | null)[] = fields.map((f) => {
     if (f.trusted) return null;
@@ -468,7 +496,7 @@ export function slackMessage(n: Notice): Row {
     if (!v) return `*${f.name}:* ${fixedValue(f)}`;
     return v.block ? `*${f.name}:*\n${quote(text ?? v.text)}` : `*${f.name}:* ${text ?? v.text}`;
   };
-  const overhead = n.title.length + intro.length + link.length +
+  const overhead = head.length + intro.length +
     fields.reduce((sum, f, i) => sum + line(f, i, "").length, 0) +
     sized.reduce((sum, v) => sum + (v?.block ? 2 * (v.text.split("\n").length - 1) : 0), 0);
   fitValues(sized.filter((v) => v !== null) as Sized[], SLACK_MAX_CHARS - overhead, cutSlack);
@@ -476,16 +504,21 @@ export function slackMessage(n: Notice): Row {
   return {
     text: `${n.title}: <${n.link.url}|${n.link.label}>`,
     blocks: [
-      { type: "header", text: { type: "plain_text", text: n.title, emoji: true } },
-      slackRowText(intro),
-      { type: "section", text: { type: "mrkdwn", text: link } },
+      { type: "section", text: { type: "mrkdwn", text: head } },
+      ...(intro ? [slackRowText(intro)] : []),
       ...fields.map((f, i) => slackRowText(line(f, i))),
     ],
   };
 }
 
-// A section whose text holds row text: Slack must not link anything in it.
-const slackRowText = (text: string): Row => ({ type: "section", text: { type: "mrkdwn", text, verbatim: true } });
+// A block that holds row text. It is a context block, whose text sits in
+// `elements` and not in a top-level text field, so it is not what Slack's
+// desktop notification reads; and the text object is verbatim, so Slack links
+// nothing in it.
+const slackRowText = (text: string): Row => ({
+  type: "context",
+  elements: [{ type: "mrkdwn", text, verbatim: true }],
+});
 
 const footer = (label: string, row: Row, at: unknown) =>
   `${label} ${String(row.id).slice(0, 8)} · ${new Date(at as string).toLocaleString("en-US")}`;

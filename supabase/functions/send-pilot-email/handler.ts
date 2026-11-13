@@ -33,6 +33,11 @@
 //     pilot row with no LOI, so the insert webhook can get here before any
 //     LOI exists. Without one the confirmation says "your application" and
 //     nothing about an LOI. A failed lookup counts as no LOI.
+//     Not closed here: the confirmation can go out for a pilot row that /apply
+//     takes back a moment later because signing failed (the applicant is told
+//     on screen to try again). That email names no LOI. One way to stop it:
+//     the wizard writes both rows in one transaction, so the webhook, which
+//     is sent after commit, only ever sees a signed application.
 
 import { namesSignedLoi, renderPilotStatusEmail, renderPilotSubmittedEmail } from "./template.ts";
 

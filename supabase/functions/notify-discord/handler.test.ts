@@ -13,6 +13,7 @@ import {
   type Deps,
   DISCORD_EMBED_MAX_CHARS,
   discordMessage,
+  discordText,
   handle,
   loiNotice,
   type Notice,
@@ -292,9 +293,163 @@ Deno.test("plain() escapes markdown so user text cannot form links or headings",
   assertEquals(plain("# Big\n- item"), "\\# Big\n\\- item");
   assertEquals(plain("**bold** `code` <@123> ||spoiler||"), "\\*\\*bold\\*\\* \\`code\\` \\<@123\\> \\|\\|spoiler\\|\\|");
   assertEquals(plain("dana-lee@example.com"), "dana-lee@example.com");
+  // A numbered item at a line start is a list in Discord; a number inside text is not.
+  assertEquals(plain("1. one\n  2. two\n3.5 trucks\n10.\nRoom 4. B"), "1\\. one\n  2\\. two\n3.5 trucks\n10\\.\nRoom 4. B");
+});
+
+// Applicant text outside inline code, as Discord reads it: a backtick opens or
+// closes code unless an odd run of backslashes escapes it.
+function outsideCode(s: string): { text: string; open: boolean } {
+  let text = "";
+  let open = false;
+  let run = 0;
+  for (const ch of s) {
+    if (ch === "`" && run % 2 === 0) {
+      open = !open;
+      run = 0;
+      continue;
+    }
+    run = ch === "\\" ? run + 1 : 0;
+    if (!open) text += ch;
+  }
+  return { text, open };
+}
+// What Discord links in embed text: a URL with a scheme. www. and host/path
+// are checked too, since discordText() promises to wrap them.
+const DISCORD_LINKABLE = /:\/\/|www\.|[a-z0-9-]\.[a-z][a-z0-9-]*\//i;
+function assertNoDiscordLink(value: string, what: string) {
+  const { text, open } = outsideCode(value);
+  assert(!open, `${what}: unclosed inline code in ${value}`);
+  assert(!DISCORD_LINKABLE.test(text), `${what}: ${value}`);
+}
+
+const URLISH = [
+  "https://evil.example/a?b=1", "HTTP://X.EXAMPLE", "discord://-/channels/1", "<https://evil.example>",
+  "[Reset](https://evil.example)", "www.cruzemaps-admin.com", "cruzemaps.com.evil.io/admin", "hthttps://tps://x.example",
+];
+
+Deno.test("discordText() puts URL-like text in inline code and escapes the rest", () => {
+  assertEquals(discordText("see https://evil.example/a now"), "see `https://evil.example/a` now");
+  assertEquals(discordText("[Reset](https://evil.example) *now*"), "`[Reset](https://evil.example)` \\*now\\*");
+  // Inside code nothing can be escaped, so a backtick and a backslash become look-alikes.
+  assertEquals(discordText("https://e`vil.example\\x`"), "`https://e\u02cbvil.example\u29f5x\u02cb`");
+  assertEquals(discordText("www.evil.io and evil.io/admin"), "`www.evil.io` and `evil.io/admin`");
+  // Not URL-like: plain text, numbers, emails (Discord does not link an email).
+  assertEquals(discordText("1.5/day, ceo@evil.io, I-35/I-10"), "1.5/day, ceo@evil.io, I-35/I-10");
+  assertEquals(discordText("1. https://x.example\n# h"), "1\\. `https://x.example`\n\\# h");
+});
+
+Deno.test("Discord: no applicant text is a link, only the embed url and the admin tab field, which are ours", () => {
+  for (const u of URLISH) {
+    const bad = `Acme ${u} (${u})\n${u}`;
+    const pilot = pilotRow({
+      company_name: bad, fleet_size: bad, truck_size: bad, contact_name: bad, contact_title: bad, contact_email: bad,
+      contact_phone: bad, fms_provider: bad, website: u, application_notes: bad, notes: bad,
+    });
+    const embeds = [
+      pilotEmbed(pilot).embeds[0],
+      discordMessage(loiNotice(loiRow({ participant_name: bad, participant_company: bad, participant_title: bad, fleet_size: bad, initials: bad }))).embeds[0],
+      discordMessage(contactNotice(contactRow({ name: bad, email: bad, organization: bad, message: bad }))).embeds[0],
+    ];
+    for (const embed of embeds) {
+      assertNoDiscordLink(embed.description, `${u} description`);
+      for (const f of embed.fields) {
+        if (f.name === "Admin tab") assertEquals(f.value, ADMIN_MESSAGES_URL);
+        else assertNoDiscordLink(f.value, `${u} ${f.name}`);
+      }
+      assert(embed.url.startsWith("https://cruzemaps.com/"));
+    }
+    // A URL on its own, as the website column usually is, is shown whole.
+    assertEquals(pilotEmbed(pilot).embeds[0].fields.find((f: Row) => f.name === "Website").value, "`" + u + "`");
+  }
+});
+
+Deno.test("Discord: a cut never leaves inline code open, so no cut-off URL turns into a link", () => {
+  for (const ch of ["https://evil.example/", "https://evil.example/ ", "x https://e.example/aa", "`https://e.example` "]) {
+    for (const notice of [
+      pilotNotice(hugeRow(ch, 3000)),
+      contactNotice(contactRow({ name: ch.repeat(900), email: ch.repeat(900), organization: ch.repeat(900), message: ch.repeat(900) })),
+      loiNotice(loiRow({ participant_name: ch.repeat(900) })),
+    ]) {
+      const embed = discordMessage(notice).embeds[0];
+      assert(embedChars(embed) <= DISCORD_EMBED_MAX_CHARS);
+      assertNoDiscordLink(embed.description, `${JSON.stringify(ch)} description`);
+      for (const f of embed.fields) {
+        assert(f.value.length >= 1 && f.value.length <= 1024, f.name);
+        if (f.name !== "Admin tab") assertNoDiscordLink(f.value, `${JSON.stringify(ch)} ${f.name}`);
+      }
+    }
+  }
+  // Every cap, not just the large ones: a title cut at each length.
+  for (let n = 1; n < 40; n++) {
+    const embed = pilotEmbed(pilotRow({ contact_title: "VP " + "https://e.example/".repeat(n) + " ok" })).embeds[0];
+    assertNoDiscordLink(embed.fields.find((f: Row) => f.name === "Title").value, `title ${n}`);
+  }
 });
 
 const SLACK_ENV = { SLACK_WEBHOOK_URL: "https://slack.invalid/hook" };
+
+// The texts of a Slack message's blocks, in order, and all of them as lines.
+const slackTexts = (msg: Row): string[] => msg.blocks.map((b: Row) => b.text.text);
+const slackBody = (msg: Row) => slackTexts(msg).join("\n");
+// Our link as slackMessage() writes it, and the block that holds it.
+const slackLink = (url: string) => `<${url}|${url.replace(/^https:\/\//, "")}>`;
+const linkLine = (label: string, url: string) => `*${label}:* ${slackLink(url)}`;
+
+// What every Slack message must look like for Slack to link nothing but ours:
+// a plain_text header, then mrkdwn sections. The third holds only our link;
+// every other one is verbatim, which turns off Slack's automatic linking of
+// URLs, bare domains, emails and channel names. The notification text names
+// only our title and link.
+function assertSlackSafe(msg: Row) {
+  const [header, ...sections] = msg.blocks;
+  assertEquals(header.type, "header");
+  assertEquals(header.text.type, "plain_text");
+  assert(header.text.text.length <= 150);
+  assert(msg.blocks.length <= 50);
+  sections.forEach((b: Row, i: number) => {
+    assertEquals(b.type, "section");
+    assertEquals(b.text.type, "mrkdwn");
+    assert(b.text.text.length >= 1 && b.text.text.length <= 3000);
+    if (i === 1) assert(/^\*[^*<>]+:\* <https:\/\/cruzemaps\.com\/[^\s<>|]*\|[^<>]+>$/.test(b.text.text), b.text.text);
+    else assertEquals(b.text.verbatim, true, b.text.text);
+  });
+  const link = sections[1].text.text.match(/<([^|>]+)\|/)![1];
+  assertEquals(msg.text, `${header.text.text}: <${link}|${sections[1].text.text.match(/^\*([^*]+):\*/)![1]}>`);
+}
+
+// Text Slack links on its own when it is not verbatim: bare domains, www.
+// hosts, emails, a URL whose scheme slackPlain() dropped, channel names.
+const SLACK_AUTOLINKED = [
+  "www.cruzemaps-admin.com", "cruzemaps.com.evil.io/admin", "ceo@evil.io", "https://acme.example",
+  "mailto:ceo@evil.io", "#general", "@here", "tel:+15125550100",
+];
+
+Deno.test("Slack: bare domains, www., emails and channel names in row text are only ever in verbatim text", () => {
+  const bad = SLACK_AUTOLINKED.join(" ");
+  const notices: Notice[] = [
+    pilotNotice(pilotRow({
+      company_name: bad, fleet_size: bad, truck_size: bad, contact_name: bad, contact_title: bad, contact_email: bad,
+      contact_phone: bad, fms_provider: bad, website: bad, application_notes: `${bad}\n${bad}`, notes: bad,
+    })),
+    loiNotice(loiRow({ participant_name: bad, participant_company: bad, participant_title: bad, fleet_size: bad, initials: bad })),
+    contactNotice(contactRow({ name: bad, email: bad, organization: bad, message: `${bad}\n${bad}` })),
+  ];
+  for (const notice of notices) {
+    const msg = slackMessage(notice);
+    assertSlackSafe(msg);
+    // The notification text and the link block hold none of the row text.
+    for (const ours of [msg.text, msg.blocks[0].text.text, msg.blocks[2].text.text]) {
+      for (const word of ["evil", "acme", "general", "@here", "tel:", "mailto"]) assert(!ours.includes(word), ours);
+    }
+    // The row text is there, scheme dropped, and only in verbatim sections.
+    const rowBlocks = msg.blocks.filter((b: Row) => /www\.|evil|acme/.test(b.text.text));
+    assert(rowBlocks.length >= 3, notice.title);
+    for (const b of rowBlocks) assertEquals(b.text.verbatim, true, b.text.text);
+    assert(rowBlocks.some((b: Row) => b.text.text.includes("www.cruzemaps-admin.com cruzemaps.com.evil.io/admin ceo@evil.io acme.example")));
+    assertEquals(slackLinks(slackBody(msg)), [slackLink(notice.link.url)]);
+  }
+});
 
 Deno.test("SLACK_WEBHOOK_URL alone posts the notice to Slack as escaped text", async () => {
   const row = contactRow({ name: "<!channel> & co", message: "[Reset](https://evil.example) *hi*" });
@@ -303,17 +458,20 @@ Deno.test("SLACK_WEBHOOK_URL alone posts the notice to Slack as escaped text", a
   assertEquals(status, 200);
   assertEquals(body, { ok: true, table: "contact_messages" });
   assertEquals(d.posts.map((p) => p.url), ["https://slack.invalid/hook"]);
-  assertEquals(Object.keys(d.posts[0].body), ["text"]);
-  const lines: string[] = d.posts[0].body.text.split("\n");
-  assertEquals(lines[0], "*New contact message*");
+  const msg = d.posts[0].body;
+  assertEquals(Object.keys(msg), ["text", "blocks"]);
+  // The notification text is ours alone.
+  assertEquals(msg.text, `New contact message: <${ADMIN_MESSAGES_URL}|Admin tab>`);
+  assertSlackSafe(msg);
+  const lines = slackBody(msg).split("\n");
+  assertEquals(lines[0], "New contact message");
   assert(lines.includes("*Name:* &lt;!channel&gt; &amp; co"));
-  // Our link is the third line, above everything the sender typed.
-  assertEquals(lines[2], `*Admin tab:* <${ADMIN_MESSAGES_URL}>`);
-  assert(lines.includes("*Name:* &lt;!channel&gt; &amp; co"));
-  // The message is quoted, its URL is not one Slack would link, and its
-  // asterisks are look-alikes that Slack does not read as bold.
+  // Our link is the third block, above everything the sender typed.
+  assertEquals(lines[2], linkLine("Admin tab", ADMIN_MESSAGES_URL));
+  // The message is quoted, its URL lost its scheme, and its asterisks are
+  // look-alikes that Slack does not read as bold.
   assertEquals(lines.slice(-2), ["*Message:*", "> [Reset](evil.example) \u2217hi\u2217"]);
-  assertEquals(d.posts[0].body.text.match(/<[^>]*>/g), [`<${ADMIN_MESSAGES_URL}>`]);
+  assertEquals(slackLinks(slackBody(msg)), [slackLink(ADMIN_MESSAGES_URL)]);
 });
 
 Deno.test("with both webhooks set the notice goes to Discord and Slack", async () => {
@@ -322,10 +480,12 @@ Deno.test("with both webhooks set the notice goes to Discord and Slack", async (
   assertEquals(body, { ok: true, table: "loi_signatures" });
   assertEquals(d.posts.map((p) => p.url), ["https://discord.invalid/default", "https://slack.invalid/hook"]);
   assertEquals(d.posts[0].body.embeds[0].title, "✍️ LOI signed");
-  const lines: string[] = d.posts[1].body.text.split("\n");
-  assertEquals(lines[0], "*✍️ LOI signed*");
+  assertSlackSafe(d.posts[1].body);
+  assertEquals(d.posts[1].body.text, `✍️ LOI signed: <https://cruzemaps.com/loi/${ID}|Signed LOI>`);
+  const lines = slackBody(d.posts[1].body).split("\n");
+  assertEquals(lines[0], "✍️ LOI signed");
   assertEquals(lines[1], "*Dana Lee* just signed the Letter of Intent.");
-  assertEquals(lines[2], `*Signed LOI:* <https://cruzemaps.com/loi/${ID}>`);
+  assertEquals(lines[2], linkLine("Signed LOI", `https://cruzemaps.com/loi/${ID}`));
 });
 
 Deno.test("a Slack failure is a 500 that names Slack, and Discord still gets the notice", async () => {
@@ -370,15 +530,17 @@ Deno.test("a pilot application keeps the contact's phone, title and the applican
   // Escaped like the other applicant text: no masked link, heading, bold or mention.
   assertEquals(value("Phone"), "+1 \\(512\\) 555-0100");
   assertEquals(value("Title"), "VP \\*Ops\\* \\<!channel\\>");
-  assertEquals(value("Applicant notes"), "\\[Reset\\]\\(https://evil.example\\)\n\\# 40 trucks on I-35 & I-10");
+  // The masked link is in inline code, so Discord shows it as text.
+  assertEquals(value("Applicant notes"), "`[Reset](https://evil.example)`\n\\# 40 trucks on I-35 & I-10");
   assertEquals(d.posts[0].body.allowed_mentions, { parse: [] });
 
-  const slack: string = d.posts[1].body.text;
+  assertSlackSafe(d.posts[1].body);
+  const slack = slackBody(d.posts[1].body);
   const lines = slack.split("\n");
   assert(lines.includes("*Phone:* +1 (512) 555-0100"));
   assert(lines.includes("*Title:* VP \u2217Ops\u2217 &lt;!channel&gt;"));
   assert(slack.includes("*Applicant notes:*\n> [Reset](evil.example)\n> # 40 trucks on I-35 &amp; I-10\n"));
-  assertEquals(slack.match(/<[^>]*>/g), ["<https://cruzemaps.com/admin>"]);
+  assertEquals(slackLinks(slack), [slackLink("https://cruzemaps.com/admin")]);
 });
 
 Deno.test("the applicant's text on a pilot application is capped", () => {
@@ -409,7 +571,8 @@ Deno.test("missing, null and blank contact details add no fields", () => {
 // Every Slack line that starts a field, and every link, in a Slack message.
 const slackLabels = (text: string) => text.split("\n").filter((l) => /^\s*\*/.test(l)).map((l) => l.match(/^\s*\*[^*]*\*/)?.[0]);
 const slackLinks = (text: string) => text.match(/<[^>]*>/g) ?? [];
-// What Slack turns into a link on its own: a URL with a scheme.
+// A URL with a scheme. Slack also links bare domains, www. hosts and emails
+// on its own; assertSlackSafe() checks that it is told not to.
 const BARE_URL = /[a-z][a-z0-9+.-]*:\/\//i;
 
 const FORGED = "\n*Admin tab:* https://evil.example\r\n> *Admin portal:* <https://evil.example|Open> *Email:* ceo@evil.example";
@@ -420,7 +583,7 @@ Deno.test("Slack: applicant text cannot forge a field or a link on a pilot appli
     "contact_phone", "fms_provider", "website", "application_notes", "notes",
   ];
   const expected = [
-    "*🚛 New pilot application*", "*Admin portal:*", "*Company:*", "*Fleet size:*", "*Truck class:*", "*Contact:*",
+    "*Admin portal:*", "*Company:*", "*Fleet size:*", "*Truck class:*", "*Contact:*",
     "*Title:*", "*Email:*", "*Phone:*", "*FMS:*", "*Website:*", "*Applicant notes:*", "*Admin notes:*",
   ];
   // The forged text in one column at a time, then in all of them at once.
@@ -429,41 +592,50 @@ Deno.test("Slack: applicant text cannot forge a field or a link on a pilot appli
     pilotRow(Object.fromEntries(cols.map((col) => [col, `Acme${FORGED}`]))),
   ];
   for (const row of rows) {
-    const text: string = slackMessage(pilotNotice(row)).text;
+    const msg = slackMessage(pilotNotice(row));
+    assertSlackSafe(msg);
+    const text = slackBody(msg);
     const lines = text.split("\n");
     assertEquals(slackLabels(text), expected);
-    assertEquals(lines[2], "*Admin portal:* <https://cruzemaps.com/admin>");
-    assertEquals(slackLinks(text), ["<https://cruzemaps.com/admin>"]);
-    // No URL but ours is one Slack would link.
-    assert(!BARE_URL.test(text.replace("<https://cruzemaps.com/admin>", "")));
-    // Past our three lines, a line is a field of ours or a quoted line of notes.
+    assertEquals(lines[2], linkLine("Admin portal", "https://cruzemaps.com/admin"));
+    assertEquals(slackLinks(text), [slackLink("https://cruzemaps.com/admin")]);
+    // No URL with a scheme is left; what is left is in verbatim text (assertSlackSafe).
+    assert(!BARE_URL.test(text.replace(slackLink("https://cruzemaps.com/admin"), "")));
+    // Each field is a block of its own, which starts with its label.
+    assertEquals(slackTexts(msg).slice(3).map((t) => t.match(/^\*[^*]*\*/)?.[0]), expected.slice(1));
+    // Past our three blocks, a line is a field of ours or a quoted line of notes.
     for (const l of lines.slice(3)) assert(/^(\*[A-Za-z ]+:\*( |$)|> |>$)/.test(l), l);
   }
   // A one-line value stays on its field's line.
-  const one: string = slackMessage(pilotNotice(pilotRow({ contact_title: `VP${FORGED}` }))).text;
+  const one = slackBody(slackMessage(pilotNotice(pilotRow({ contact_title: `VP${FORGED}` }))));
   assert(one.split("\n").some((l) => l.startsWith("*Title:* VP ∗Admin tab:∗ evil.example &gt; ")), one);
 });
 
 Deno.test("Slack: contact and LOI text cannot forge a field or a link either", () => {
-  const contact: string = slackMessage(contactNotice(contactRow({
+  const contactMsg = slackMessage(contactNotice(contactRow({
     name: `Dana${FORGED}`, email: `d@x.example${FORGED}`, organization: `Acme${FORGED}`, message: `Hello${FORGED}`,
-  }))).text;
-  assertEquals(slackLabels(contact), ["*New contact message*", "*Admin tab:*", "*Name:*", "*Organization:*", "*Email:*", "*Message:*"]);
-  assertEquals(slackLinks(contact), [`<${ADMIN_MESSAGES_URL}>`]);
-  assert(!BARE_URL.test(contact.replace(`<${ADMIN_MESSAGES_URL}>`, "")));
+  })));
+  assertSlackSafe(contactMsg);
+  const contact = slackBody(contactMsg);
+  assertEquals(slackLabels(contact), ["*Admin tab:*", "*Name:*", "*Organization:*", "*Email:*", "*Message:*"]);
+  assertEquals(slackLinks(contact), [slackLink(ADMIN_MESSAGES_URL)]);
+  assert(!BARE_URL.test(contact.replace(slackLink(ADMIN_MESSAGES_URL), "")));
 
-  const loi: string = slackMessage(loiNotice(loiRow({
+  const loiMsg = slackMessage(loiNotice(loiRow({
     participant_name: `Dana${FORGED}`, participant_company: `Acme${FORGED}`, participant_title: `COO${FORGED}`,
     fleet_size: `40${FORGED}`, initials: `DL${FORGED}`,
-  }))).text;
-  const link = `<https://cruzemaps.com/loi/${ID}>`;
+  })));
+  assertSlackSafe(loiMsg);
+  const loi = slackBody(loiMsg);
+  const link = slackLink(`https://cruzemaps.com/loi/${ID}`);
   // The signer's name is in bold on line two; nothing in it closes the bold.
   assertEquals(slackLabels(loi), [
-    "*✍️ LOI signed*", loi.split("\n")[1].match(/^\*[^*]*\*/)![0], "*Signed LOI:*",
+    loi.split("\n")[1].match(/^\*[^*]*\*/)![0], "*Signed LOI:*",
     "*Participant:*", "*Initials:*", "*Company:*", "*Fleet size:*", "*Title:*",
   ]);
   assert(loi.split("\n")[1].endsWith("* just signed the Letter of Intent."));
   assertEquals(loi.split("\n").length, 8);
+  assertEquals(loiMsg.blocks.length, 8);
   assertEquals(slackLinks(loi), [link]);
   assert(!BARE_URL.test(loi.replace(link, "")));
 });
@@ -481,19 +653,22 @@ const hugeRow = (ch: string, n = 20000): Row => {
 Deno.test("Slack: the admin link survives however long the applicant's text is", () => {
   for (const ch of ["x", "&", "<", "*", "\n", "y\n", "😀", FORGED]) {
     for (const notice of [pilotNotice(hugeRow(ch)), contactNotice(contactRow({ name: ch.repeat(9000), email: ch.repeat(9000), organization: ch.repeat(9000), message: ch.repeat(9000) }))]) {
-      const text: string = slackMessage(notice).text;
-      assert(text.length <= SLACK_MAX_CHARS, `${JSON.stringify(ch)} ${text.length}`);
-      assertEquals(text.split("\n")[2], `*${notice.link.label}:* <${notice.link.url}>`);
-      assertEquals(slackLinks(text), [`<${notice.link.url}>`]);
+      const msg = slackMessage(notice);
+      assertSlackSafe(msg);
+      const text = slackBody(msg);
+      const total = slackTexts(msg).join("").length;
+      assert(total <= SLACK_MAX_CHARS, `${JSON.stringify(ch)} ${total}`);
+      assertEquals(slackTexts(msg)[2], linkLine(notice.link.label, notice.link.url));
+      assertEquals(slackLinks(text), [slackLink(notice.link.url)]);
       // Nothing was cut blind: every field is still there, the last one included.
       const last = notice.fields.filter((f) => !f.trusted).at(-1)!.name;
       assert(text.includes(`\n*${last}:*`), JSON.stringify(ch));
     }
   }
   // A long signer name cannot push the LOI link out either.
-  const loi: string = slackMessage(loiNotice(loiRow({ participant_name: "&".repeat(9000), participant_company: "<".repeat(9000) }))).text;
-  assert(loi.length <= SLACK_MAX_CHARS);
-  assertEquals(loi.split("\n")[2], `*Signed LOI:* <https://cruzemaps.com/loi/${ID}>`);
+  const loi = slackMessage(loiNotice(loiRow({ participant_name: "&".repeat(9000), participant_company: "<".repeat(9000) })));
+  assert(slackTexts(loi).join("").length <= SLACK_MAX_CHARS);
+  assertEquals(slackTexts(loi)[2], linkLine("Signed LOI", `https://cruzemaps.com/loi/${ID}`));
 });
 
 // What Discord counts toward its 6000-character limit for one embed.

@@ -17,13 +17,21 @@
 //   - more than 10 contact messages in 10 minutes posts one summary note per
 //     10-minute window instead of one embed per message
 //   - allowed_mentions is empty, so text like @everyone never pings, and user
-//     text is markdown-escaped so it cannot form masked links or headings
+//     text is markdown-escaped so it cannot form masked links, headings or
+//     lists. Applicant text that looks like a URL (a scheme, www., or a host
+//     with a path) is put in inline code, where Discord does not link it, so
+//     the only link Discord shows is the embed's own url, which is ours
 //   - the Discord embed is kept under Discord's 6000-character total by
 //     shortening row text, notes first
-//   - the Slack copy escapes &, < and >, so user text cannot form links or
-//     <!channel> mentions there either. Row text there cannot start a line,
-//     turn bold or hold a clickable URL, so it cannot pose as a field or as
-//     the admin link, and the admin link sits above all row text
+//   - the Slack copy is Block Kit. Every text object that holds row text is
+//     mrkdwn with verbatim: true, which per Slack's docs turns off its
+//     automatic linking of URLs, bare domains, emails and channel names, and
+//     the row text is escaped (&, < and >) so it cannot write a <link> or a
+//     <!channel> mention by hand. Row text cannot start a block, a line or turn
+//     bold, so it cannot pose as a field. The admin link is an explicit
+//     <url|text> link in a block of its own that holds no row text, and the
+//     plain `text` fallback (what Slack shows in notifications) holds only
+//     our title and that link
 
 export const TABLES = ["pilot_applications", "loi_signatures", "contact_messages"] as const;
 export type Table = (typeof TABLES)[number];
@@ -248,20 +256,58 @@ function rawText(f: NoticeField): string {
 }
 
 // Escape Discord markdown so user text shows as typed: no masked links, bold,
-// code blocks, headings, quotes or mention syntax. allowed_mentions already
-// stops pings; this stops formatting.
+// code blocks, headings, quotes, lists or mention syntax. allowed_mentions
+// already stops pings; this stops formatting. It does not stop Discord from
+// linking a raw URL; discordText() does that.
 export function plain(value: unknown): string {
+  return escapeLineStarts(escapeInline(value == null ? "" : String(value)));
+}
+
+const escapeInline = (s: string) => s.replace(/[\\`*_~|<>[\]()]/g, "\\$&");
+// A heading (#), a bullet or subtext (-) and a numbered item ("1. ") start a
+// line in Discord markdown.
+const escapeLineStarts = (s: string) =>
+  s.replace(/^(\s*)([#-])/gm, "$1\\$2").replace(/^(\s*)(\d+)\.(?=\s|$)/gm, "$1$2\\.");
+
+// A run of text with no whitespace that Discord could link, or that reads as
+// a web address: a scheme (https://, discord://, any other), a www. host, or a
+// host name with a path (evil.example/admin). Discord links only the first
+// kind; the other two are wrapped as well so no address in applicant text
+// looks like a link next to ours. Emails are left as they are: Discord does
+// not link them.
+const URL_LIKE = /:\/\/|(?:^|[^a-z0-9-])www\.|[a-z0-9-]\.[a-z][a-z0-9-]*\//i;
+
+// Row text for a Discord embed: escaped like plain(), and every URL-like run
+// in inline code, where Discord shows it as text, not as a link. Markdown
+// escapes do not work inside inline code, so a backtick there becomes a
+// look-alike (it would close the code early) and so does a backslash (so a
+// backtick that opens or closes code is always one with an even number of
+// backslashes before it, which cutDiscord relies on).
+export function discordText(value: unknown): string {
   const s = value == null ? "" : String(value);
-  return s.replace(/[\\`*_~|<>[\]()]/g, "\\$&").replace(/^(\s*)([#-])/gm, "$1\\$2");
+  const inline = s.split(/(\s+)/).map((part) =>
+    URL_LIKE.test(part) ? "`" + part.replace(/`/g, "\u02cb").replace(/\\/g, "\u29f5") + "`" : escapeInline(part)
+  ).join("");
+  return escapeLineStarts(inline);
+}
+
+// Where the backticks that open and close inline code are in discordText()
+// output: the ones not escaped by an odd run of backslashes.
+function codeTicks(s: string): number[] {
+  const at: number[] = [];
+  for (const m of s.matchAll(/(\\*)`/g)) if (m[1].length % 2 === 0) at.push(m.index! + m[1].length);
+  return at;
 }
 
 // Row text made safe for Slack mrkdwn. &, < and > are escaped the way Slack
-// asks, so the text cannot form a <link> or a <!channel> mention. Slack has no
-// escape for its formatting characters, so *, ~ and ` become look-alike
-// characters, and so does a _ at the edge of a word (a_b stays as typed, which
-// keeps email addresses intact). URL schemes are dropped, so Slack does not
-// turn a URL in applicant text into a link: the only link in a notice is ours.
-// (The scheme pattern is bounded so a long run of letters stays cheap.)
+// asks, so the text cannot form a <link> or a <!channel> mention by hand.
+// Slack has no escape for its formatting characters, so *, ~ and ` become
+// look-alike characters, and so does a _ at the edge of a word (a_b stays as
+// typed, which keeps email addresses intact). URL schemes are dropped as well.
+// This alone does not stop Slack from linking what is left (acme.example,
+// www.evil.example, ceo@evil.example): slackMessage() puts the text in
+// verbatim text objects for that. (The scheme pattern is bounded so a long
+// run of letters stays cheap.)
 export function slackPlain(value: unknown): string {
   let s = value == null ? "" : String(value);
   let before: string;
@@ -291,9 +337,16 @@ function dropHalfPair(s: string): string {
 }
 
 // An odd run of backslashes at the end means the last one escaped a character
-// that was cut off.
+// that was cut off. An odd number of code backticks means the cut fell inside
+// inline code: Discord would show the opening backtick as text and link the
+// URL after it, so the cut-off code is dropped whole.
 const cutDiscord = (s: string, max: number) =>
-  cut(s, max, (head) => (/\\+$/.exec(head)?.[0].length ?? 0) % 2 ? head.slice(0, -1) : head);
+  cut(s, max, (head) => {
+    let h = (/\\+$/.exec(head)?.[0].length ?? 0) % 2 ? head.slice(0, -1) : head;
+    const ticks = codeTicks(h);
+    if (ticks.length % 2) h = h.slice(0, ticks[ticks.length - 1]);
+    return h;
+  });
 // Half an entity such as "&am" at the end.
 const cutSlack = (s: string, max: number) => cut(s, max, (head) => head.replace(/&[a-z]{0,3}$/, ""));
 
@@ -336,14 +389,14 @@ export function fitValues(
 export function discordMessage(n: Notice): Row {
   const subject = oneLine(n.subject);
   const description = subject
-    ? `**${cutDiscord(plain(subject), SUBJECT_CHARS)}** ${n.description}`
+    ? `**${cutDiscord(discordText(subject), SUBJECT_CHARS)}** ${n.description}`
     : n.description;
 
   const sized: (Sized | null)[] = n.fields.map((f) => {
     if (f.trusted) return null;
     const text = rawText(f);
     if (!text) return null;
-    return { text: cutDiscord(plain(text), f.max ?? DISCORD_FIELD_MAX_CHARS), block: !!f.block };
+    return { text: cutDiscord(discordText(text), f.max ?? DISCORD_FIELD_MAX_CHARS), block: !!f.block };
   });
   const fixed = n.title.length + description.length + (n.footer?.length ?? 0) +
     n.fields.reduce((sum, f, i) => sum + f.name.length + (sized[i] ? 0 : fixedValue(f).length), 0);
@@ -375,25 +428,32 @@ function fixedValue(f: NoticeField): string {
   return f.trusted ? String(f.value) : f.empty ?? "(none)";
 }
 
-// The same notice as a Slack incoming-webhook message.
+// The same notice as a Slack incoming-webhook message, in Block Kit.
 //
-// Slack shows the text as mrkdwn and a field is only a line that starts with a
-// bold label, so row text must never start a line of its own or come out bold:
-//   - our link is the third line, ahead of all row text, so no cut reaches it
-//   - a one-line value has its line breaks collapsed
-//   - a multi-line value is quoted, every line behind "> "
-//   - all row text goes through slackPlain(): no bold, no <link>, no URL that
-//     Slack would turn into a link
-//   - row text is shortened first when the message would pass 3000 characters
+//   - blocks: a header with our title, a line with our description (and, for
+//     an LOI, the signer's name in bold), a block with the admin link, then
+//     one block per field. Every block that holds row text is mrkdwn with
+//     verbatim: true: Slack's docs say that skips its automatic linking of
+//     URLs, bare domains, emails and channel names, while an explicit link
+//     written by hand would still work, which slackPlain() rules out by
+//     escaping < and >. So the only link in the blocks is ours.
+//   - the admin link is an explicit <url|text> link in a block that holds only
+//     our text, so no row text and no cut can reach it
+//   - row text cannot start a block, a line or turn bold, so it cannot pose
+//     as a field: a one-line value has its line breaks collapsed, a multi-line
+//     value is quoted, every line behind "> ", and slackPlain() swaps the
+//     formatting characters for look-alikes
+//   - text: the fallback Slack shows in notifications and where blocks are
+//     not shown. It is mrkdwn that Slack links on its own, so it carries only
+//     our title and the admin link, never row text
+//   - row text is shortened first when the blocks together would pass 3000
+//     characters
 export function slackMessage(n: Notice): Row {
   const subject = oneLine(n.subject);
-  const head = [
-    `*${n.title}*`,
-    subject ? `*${cutSlack(slackPlain(subject), SUBJECT_CHARS)}* ${n.description}` : n.description,
-    `*${n.link.label}:* <${n.link.url}>`,
-  ];
+  const intro = subject ? `*${cutSlack(slackPlain(subject), SUBJECT_CHARS)}* ${n.description}` : n.description;
+  const link = `*${n.link.label}:* <${n.link.url}|${n.link.url.replace(/^https:\/\//, "")}>`;
 
-  // The link is already on its own line; a field that repeats it is dropped.
+  // The link has a block of its own; a field that repeats it is dropped.
   const fields = n.fields.filter((f) => !(f.trusted && f.value === n.link.url));
   const sized: (Sized | null)[] = fields.map((f) => {
     if (f.trusted) return null;
@@ -408,14 +468,24 @@ export function slackMessage(n: Notice): Row {
     if (!v) return `*${f.name}:* ${fixedValue(f)}`;
     return v.block ? `*${f.name}:*\n${quote(text ?? v.text)}` : `*${f.name}:* ${text ?? v.text}`;
   };
-  const overhead = head.join("\n").length +
-    fields.reduce((sum, f, i) => sum + 1 + line(f, i, "").length, 0) +
+  const overhead = n.title.length + intro.length + link.length +
+    fields.reduce((sum, f, i) => sum + line(f, i, "").length, 0) +
     sized.reduce((sum, v) => sum + (v?.block ? 2 * (v.text.split("\n").length - 1) : 0), 0);
   fitValues(sized.filter((v) => v !== null) as Sized[], SLACK_MAX_CHARS - overhead, cutSlack);
 
-  const lines = [...head, ...fields.map((f, i) => line(f, i))];
-  return { text: lines.join("\n").slice(0, SLACK_MAX_CHARS) };
+  return {
+    text: `${n.title}: <${n.link.url}|${n.link.label}>`,
+    blocks: [
+      { type: "header", text: { type: "plain_text", text: n.title, emoji: true } },
+      slackRowText(intro),
+      { type: "section", text: { type: "mrkdwn", text: link } },
+      ...fields.map((f, i) => slackRowText(line(f, i))),
+    ],
+  };
 }
+
+// A section whose text holds row text: Slack must not link anything in it.
+const slackRowText = (text: string): Row => ({ type: "section", text: { type: "mrkdwn", text, verbatim: true } });
 
 const footer = (label: string, row: Row, at: unknown) =>
   `${label} ${String(row.id).slice(0, 8)} · ${new Date(at as string).toLocaleString("en-US")}`;

@@ -7,6 +7,7 @@
 
 import { assert, assertEquals } from "jsr:@std/assert@1.0.13";
 import { type Deps, type Email, handle, ledgerKey, type Row, serviceKey } from "./handler.ts";
+import { CLIENT_PORTAL_URL, renderPilotStatusEmail, renderPilotSubmittedEmail } from "./template.ts";
 
 const NOW = new Date("2026-10-22T12:00:00Z");
 const ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -348,4 +349,47 @@ Deno.test("serviceKey prefers a secret key over the legacy service_role key", ()
   assertEquals(serviceKey(env({ SUPABASE_SECRET_KEYS: '{"other":"b"}', SUPABASE_SERVICE_ROLE_KEY: "c" })), "c");
   assertEquals(serviceKey(env({ SUPABASE_SERVICE_ROLE_KEY: "c" })), "c");
   assertEquals(serviceKey(env({})), undefined);
+});
+
+Deno.test("the approval email says where to sign in, as a link and in plain text", async () => {
+  const d = fake({ rows: [pilotRow()] });
+  await call(d, insertPayload());
+  review(d, "approved");
+  assertEquals((await call(d, updatePayload())).body.ok, true);
+  const mail = d.sent[1];
+  assertEquals(CLIENT_PORTAL_URL, "https://client.cruzemaps.com");
+  assert(mail.html.includes(`Sign in at <a href="${CLIENT_PORTAL_URL}"`));
+  assert(mail.html.includes("with the account you used to apply"));
+  assert(mail.text.includes(`Sign in at ${CLIENT_PORTAL_URL} with the account you used to apply.`));
+  assert(!mail.text.includes("<a"));
+  // The fleet dashboard button stays.
+  assert(mail.html.includes('href="https://cruzemaps.com/fleet-dashboard"'));
+  // The confirmation sent at apply time does not point at the portal yet.
+  assert(!JSON.stringify(d.sent[0]).includes("client.cruzemaps.com"));
+});
+
+Deno.test("only the approval email points at the Client Portal", () => {
+  const vars = { email: "dana@acme.example", companyName: "Acme Freight", dashboardUrl: "https://cruzemaps.com/fleet-dashboard" };
+  for (const status of ["in_review", "onboarding", "active", "denied", "archived", "something_new"]) {
+    const mail = renderPilotStatusEmail({ ...vars, status });
+    assert(!mail.html.includes("client.cruzemaps.com"), status);
+    assert(!mail.text.includes("client.cruzemaps.com"), status);
+  }
+  const approved = renderPilotStatusEmail({ ...vars, status: "approved" });
+  assertEquals(approved.subject, "Your Cruze pilot application was approved");
+  assert(approved.text.includes(CLIENT_PORTAL_URL));
+});
+
+Deno.test("the confirmation email mentions the LOI the /apply wizard has the fleet sign", () => {
+  // /apply inserts a loi_signatures row with every application (src/pages/Apply.tsx),
+  // so "signed LOI" is true of every applicant who gets this email.
+  const mail = renderPilotSubmittedEmail({
+    email: "dana@acme.example",
+    companyName: "Acme <Freight>",
+    dashboardUrl: "https://cruzemaps.com/fleet-dashboard",
+  });
+  assert(mail.text.includes("signed LOI"));
+  assert(mail.html.includes("(Acme &lt;Freight&gt;)"));
+  // No download link unless the caller passes one.
+  assert(!mail.html.includes("Download your signed LOI"));
 });

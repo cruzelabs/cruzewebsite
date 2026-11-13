@@ -23,6 +23,9 @@ const BRAND = {
 
 const LOGO_URL = "https://cruzemaps.com/logo.png";
 const SITE = "https://cruzemaps.com";
+// The Client Portal, where an approved fleet runs its pilot. The link text is
+// the full URL so the plain-text email keeps it when the tags are stripped.
+export const CLIENT_PORTAL_URL = "https://client.cruzemaps.com";
 
 const STATUS_COPY: Record<
   string,
@@ -45,7 +48,7 @@ const STATUS_COPY: Record<
   approved: {
     subject: "Your Cruze pilot application was approved",
     headline: "You're approved for the pilot",
-    body: "Welcome aboard. Check your fleet dashboard for kickoff details and next steps from our team.",
+    body: `Welcome aboard. Sign in at <a href="${CLIENT_PORTAL_URL}" style="color:${BRAND.orange};">${CLIENT_PORTAL_URL}</a> with the account you used to apply. Check your fleet dashboard for kickoff details and next steps from our team.`,
     accent: BRAND.orange,
     accentBar: BRAND.orangeBright,
   },

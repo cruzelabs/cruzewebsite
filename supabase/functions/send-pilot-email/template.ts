@@ -108,6 +108,7 @@ export function renderPilotSubmittedEmail(vars: {
     accent: copy.accent,
     accentBar: copy.accentBar,
     extraHtml: extra,
+    extraText: vars.loiUrl ? `Download your signed LOI: ${vars.loiUrl}` : "",
   });
 }
 
@@ -147,6 +148,8 @@ export function renderPilotStatusEmail(vars: {
     accent: copy.accent,
     accentBar: copy.accentBar,
     extraHtml: messageBlock,
+    // The plain-text email carries the staff message too, word for word.
+    extraText: vars.fleetMessage ? `Message from Cruze:\n${vars.fleetMessage}` : "",
   });
 }
 
@@ -162,6 +165,9 @@ function wrapEmail(opts: {
   accent: string;
   accentBar: string;
   extraHtml?: string;
+  // The plain-text form of extraHtml. Set both or neither, so a reader of the
+  // plain-text email misses nothing the HTML shows.
+  extraText?: string;
 }): { subject: string; html: string; text: string } {
   const html = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -193,6 +199,7 @@ Or: <a href="${escapeAttr(opts.ctaUrl)}" style="color:${opts.accent};">${escapeH
     "",
     opts.body.replace(/<[^>]+>/g, ""),
     "",
+    ...(opts.extraText ? [opts.extraText, ""] : []),
     `${opts.ctaLabel}: ${opts.ctaUrl}`,
     "",
     "— Cruzemaps",

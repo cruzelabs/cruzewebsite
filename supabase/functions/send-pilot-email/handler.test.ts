@@ -209,11 +209,13 @@ Deno.test("a message no staff member saved is never sent as Message from Cruze",
   assertEquals(d.sent.length, 1);
   assert(!JSON.stringify(d.sent[0]).includes("evil.example"));
   assert(!d.sent[0].html.includes("Message from Cruze"));
+  assert(!d.sent[0].text.includes("Message from Cruze"));
 
   // Once a staff member saves the row, its message goes out.
   d.rows.set(ID, { ...d.rows.get(ID), status: "onboarding", fleet_visible_message: "Kickoff on Monday.", reviewed_at: minutesAgo(0), reviewed_by: STAFF });
   assertEquals((await call(d, updatePayload())).body.ok, true);
   assert(d.sent[1].html.includes("Message from Cruze"));
+  assert(d.sent[1].text.includes("Message from Cruze:\nKickoff on Monday."));
   assert(d.sent[1].html.includes("Kickoff on Monday."));
 });
 
@@ -392,4 +394,43 @@ Deno.test("the confirmation email mentions the LOI the /apply wizard has the fle
   assert(mail.html.includes("(Acme &lt;Freight&gt;)"));
   // No download link unless the caller passes one.
   assert(!mail.html.includes("Download your signed LOI"));
+});
+
+Deno.test("a staff message is in the HTML and in the plain text of the status email", async () => {
+  const d = fake({ rows: [pilotRow()] });
+  await call(d, insertPayload());
+  const message = "Kickoff is Monday at 9am CT.\nBring your <ELD> login & dispatcher.";
+  d.rows.set(ID, { ...d.rows.get(ID), status: "onboarding", fleet_visible_message: message, reviewed_at: minutesAgo(0), reviewed_by: STAFF });
+  assertEquals((await call(d, updatePayload())).body.ok, true);
+  const mail = d.sent[1];
+  assert(mail.html.includes("Message from Cruze"));
+  assert(mail.html.includes("Kickoff is Monday at 9am CT.\nBring your &lt;ELD&gt; login &amp; dispatcher."));
+  // Plain text: the same heading, then the message as staff typed it, between
+  // the status copy and the dashboard link.
+  const lines: string[] = mail.text.split("\n");
+  const at = lines.indexOf("Message from Cruze:");
+  assert(at > 0, mail.text);
+  assertEquals(lines.slice(at, at + 4), ["Message from Cruze:", "Kickoff is Monday at 9am CT.", "Bring your <ELD> login & dispatcher.", ""]);
+  assert(at > lines.indexOf("Onboarding in progress"));
+  assert(at < lines.findIndex((l) => l.startsWith("Open fleet dashboard: ")));
+});
+
+Deno.test("no staff message means no Message from Cruze in either format", () => {
+  const vars = { email: "dana@acme.example", companyName: "Acme Freight", dashboardUrl: "https://cruzemaps.com/fleet-dashboard" };
+  for (const fleetMessage of [undefined, null, ""]) {
+    const mail = renderPilotStatusEmail({ ...vars, status: "in_review", fleetMessage });
+    assert(!mail.html.includes("Message from Cruze"));
+    assert(!mail.text.includes("Message from Cruze"));
+  }
+  const withMessage = renderPilotStatusEmail({ ...vars, status: "in_review", fleetMessage: "We will call you Tuesday." });
+  assert(withMessage.html.includes("We will call you Tuesday."));
+  assert(withMessage.text.includes("Message from Cruze:\nWe will call you Tuesday.\n"));
+});
+
+Deno.test("the LOI download link, when given, is in the plain text as well", () => {
+  const vars = { email: "dana@acme.example", companyName: "Acme Freight", dashboardUrl: "https://cruzemaps.com/fleet-dashboard" };
+  const mail = renderPilotSubmittedEmail({ ...vars, loiUrl: "https://cruzemaps.com/loi/abc" });
+  assert(mail.html.includes('href="https://cruzemaps.com/loi/abc"'));
+  assert(mail.text.includes("Download your signed LOI: https://cruzemaps.com/loi/abc"));
+  assert(!renderPilotSubmittedEmail(vars).text.includes("Download your signed LOI"));
 });

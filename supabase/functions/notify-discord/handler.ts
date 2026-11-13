@@ -27,8 +27,8 @@
 //     mrkdwn with verbatim: true, which per Slack's docs turns off its
 //     automatic linking of URLs, bare domains, emails and channel names, and
 //     the row text is escaped (&, < and >) so it cannot write a <link> or a
-//     <!channel> mention by hand. Row text cannot start a block, a line or turn
-//     bold, so it cannot pose as a field
+//     <!channel> mention by hand. Row text cannot start a line or turn bold on
+//     its own, so it cannot pose as a field
 //   - a Slack notification shows only our text. The first block is ours alone
 //     (the notice kind, our description and the admin link, an explicit
 //     <url|text> link) and is the only block with a top-level text field,
@@ -445,12 +445,17 @@ function fixedValue(f: NoticeField): string {
 //   notifications exclusively use message.text."
 //   https://docs.slack.dev/messaging/formatting-message-text/ (under "Adding
 //   your blocks array"). The change was announced in
-//   https://docs.slack.dev/changelog/2026/07/13/notification-changes/, which
-//   says only that desktop notifications "now pull text from blocks first".
+//   https://docs.slack.dev/changelog/2026/07/13/notification-changes/:
+//   "Slack desktop client notifications now pull text from blocks first,
+//   falling back to the top-level text field only if no text can be extracted
+//   from blocks. Mobile notifications continue to exclusively use
+//   message.text."
 // Neither page names the block that feeds the notification or says that only
 // the first one is read (both read 2026-11-13). So no block may hold row text
-// in its top-level text field (a section and a header have one; a context
-// block has only `elements`):
+// in its top-level text field. A section and a header have one; a context
+// block's fields are `type`, `elements` and `block_id`, with no `text`
+// (https://docs.slack.dev/reference/block-kit/blocks/section-block/ and
+// https://docs.slack.dev/reference/block-kit/blocks/context-block/). Hence:
 //
 //   - blocks[0] is a section whose text is ours alone: the title (the notice
 //     kind), our description and the admin link, an explicit <url|text> link.
@@ -463,10 +468,12 @@ function fixedValue(f: NoticeField): string {
 //     linking of URLs, bare domains, emails and channel names, while an
 //     explicit link written by hand would still work, which slackPlain()
 //     rules out by escaping < and >. So the only link in the blocks is ours
-//   - row text cannot start a block, a line or turn bold, so it cannot pose
-//     as a field: a one-line value has its line breaks collapsed, a multi-line
-//     value is quoted, every line behind "> ", and slackPlain() swaps the
-//     formatting characters for look-alikes
+//   - row text cannot start a line or turn bold on its own, so it cannot pose
+//     as a field: every one of those blocks opens with bold of ours (a field's
+//     label, or for an LOI the signer's name inside bold it cannot close), a
+//     one-line value has its line breaks collapsed, a multi-line value is
+//     quoted, every line behind "> ", and slackPlain() swaps the formatting
+//     characters for look-alikes
 //   - text: what the mobile notification shows, and what Slack shows where
 //     blocks are not. It is mrkdwn that Slack links on its own, so it carries
 //     only our title and the admin link, never row text

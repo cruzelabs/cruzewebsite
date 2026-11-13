@@ -425,7 +425,9 @@ function allStrings(v: unknown): string[] {
 //     most one line of description, then the link line
 //   - every other block is a context block: no top-level text field, and one
 //     mrkdwn text object that is verbatim, which turns off Slack's automatic
-//     linking of URLs, bare domains, emails and channel names
+//     linking of URLs, bare domains, emails and channel names. It opens with
+//     bold of ours: a field's label, or the LOI signer's name, which cannot
+//     close the bold it is in
 //   - `text`, the mobile notification, names only our title and link
 // That the first block holds no row text is checked where the notice is at
 // hand, against slackHead().
@@ -453,6 +455,7 @@ function assertSlackSafe(msg: Row) {
     assertEquals(b.elements[0].type, "mrkdwn");
     assertEquals(b.elements[0].verbatim, true, b.elements[0].text);
     assert(b.elements[0].text.length >= 1 && b.elements[0].text.length <= 3000);
+    assert(/^\*[^*\n]*\*/.test(b.elements[0].text), b.elements[0].text);
   }
   assertEquals(desktopNotification(msg), [head.text.text]);
   assertEquals(msg.text, `${title[1]}: <${link[2]}|${link[1]}>`);

@@ -9,7 +9,8 @@ import path from "path";
 //     at the top, so the pure-logic suite keeps running in Node and never pays
 //     the jsdom startup cost.
 // The watchdog Worker's pure state machine (workers/watchdog/src/apiProbe.ts)
-// has no Workers-runtime imports, so its test runs here in Node as well.
+// has no Workers-runtime imports, so its test runs here in Node as well, and so
+// do the site Worker's route matcher and handler (worker/routes.ts).
 // `esbuild.jsx: "automatic"` gives the .tsx files the React 17+ automatic JSX
 // runtime (matching tsconfig's `jsx: "react-jsx"`), so component tests don't
 // need to `import React`. We avoid the SWC react plugin on purpose — esbuild's
@@ -28,7 +29,7 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.{test,spec}.{ts,tsx}", "workers/watchdog/src/**/*.test.ts"],
+    include: ["src/**/*.{test,spec}.{ts,tsx}", "workers/watchdog/src/**/*.test.ts", "worker/**/*.test.ts"],
     // Polyfills jsdom-missing layout APIs (ResizeObserver, matchMedia) that
     // Radix primitives touch on mount. No-op for the node-env lib suite.
     setupFiles: ["./src/test/setup-dom.ts"],

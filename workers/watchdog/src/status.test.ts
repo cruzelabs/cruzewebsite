@@ -61,9 +61,16 @@ describe("pageUp", () => {
     expect(pageUp(false, 0, null)).toBe(false);
   });
 
-  it("checks the website without the login exception and every portal with it", () => {
+  it("allows the Vercel login redirect only for the Admin Website", () => {
     expect(PAGE_CHECKS.website.login).toBe(false);
-    expect([PAGE_CHECKS.client, PAGE_CHECKS.driver, PAGE_CHECKS.admin].every((c) => c.login)).toBe(true);
+    expect(PAGE_CHECKS.client.login).toBe(false);
+    expect(PAGE_CHECKS.driver.login).toBe(false);
+    expect(PAGE_CHECKS.admin.login).toBe(true);
+  });
+
+  it("checks the two public portals at their own sign-in page", () => {
+    expect(PAGE_CHECKS.client.url).toBe("https://client.cruzemaps.com/sign-in");
+    expect(PAGE_CHECKS.driver.url).toBe("https://driver.cruzemaps.com/sign-in");
   });
 });
 

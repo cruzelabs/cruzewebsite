@@ -1,5 +1,5 @@
 import { supabase } from "@/lib/supabase";
-import type { ApplyWizardPayload } from "@/lib/pilotApplication";
+import { blankWizard, type ApplyWizardPayload } from "@/lib/pilotApplication";
 
 const SESSION_KEY = "pending_application";
 
@@ -32,18 +32,7 @@ export async function loadWizardDraft(
   userEmail: string | undefined
 ): Promise<WizardDraft> {
   const base: WizardDraft = {
-    companyName: "",
-    website: "",
-    fleetSize: "",
-    truckSize: "",
-    primaryLanes: "",
-    fmsProvider: "",
-    fmsOther: "",
-    contactEmail: userEmail || "",
-    contactName: "",
-    contactPhone: "",
-    contactTitle: "",
-    notes: "",
+    ...blankWizard(userEmail || ""),
     loiAgreed: false,
     loiInitials: "",
   };

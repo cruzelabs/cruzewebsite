@@ -20,6 +20,7 @@ import {
   type Notice,
   PILOT_APPLICANT_NOTES_CHARS,
   PILOT_PHONE_CHARS,
+  PILOT_SITES_CHARS,
   PILOT_TITLE_CHARS,
   pilotEmbed,
   pilotNotice,
@@ -107,6 +108,7 @@ const pilotRow = (over: Row = {}): Row => ({
   company_name: "Acme Freight",
   truck_size: "Class 8",
   fleet_size: "40",
+  truck_count: 40,
   notes: null,
   contact_name: "Dana Lee",
   contact_email: "dana@example.com",
@@ -114,9 +116,31 @@ const pilotRow = (over: Row = {}): Row => ({
   contact_title: null,
   application_notes: null,
   fms_provider: "Samsara",
+  fms_other: null,
+  primary_lanes: "Laredo yard; I-35 Laredo to Dallas",
+  data_authorizer_name: null,
+  data_authorizer_email: null,
+  safety_contact_name: null,
+  safety_contact_email: null,
+  tablet_model: null,
+  tablet_count: null,
+  tablet_management: null,
   website: "https://acme.example",
   created_at: minutesAgo(1),
   ...over,
+});
+
+// The applicant's free text from migration 026, each column set to `text`.
+// truck_count is cleared so the Trucks field shows fleet_size, which is text.
+const newFormText = (text: string): Row => ({
+  truck_count: null,
+  fms_other: text,
+  primary_lanes: text,
+  data_authorizer_name: text,
+  data_authorizer_email: text,
+  safety_contact_name: text,
+  safety_contact_email: text,
+  tablet_model: text,
 });
 
 const loiRow = (over: Row = {}): Row => ({
@@ -273,7 +297,8 @@ Deno.test("pilot and LOI embeds keep their shape", async () => {
   const [pilot, loi] = d.posts.map((p) => p.body);
   assertEquals(pilot.embeds[0].title, "🚛 New pilot application");
   assertEquals(pilot.embeds[0].fields.map((f: Row) => f.name), [
-    "Company", "Fleet size", "Truck class", "Contact", "Email", "FMS", "Website", "Admin notes",
+    "Company", "Trucks", "ELD or telematics", "Sites or lanes", "Truck class", "Contact", "Email", "Website",
+    "Admin notes",
   ]);
   assertEquals(pilot.embeds[0].url, "https://cruzemaps.com/admin");
   assertEquals(loi.embeds[0].title, "✍️ LOI signed");
@@ -346,7 +371,7 @@ Deno.test("Discord: no applicant text is a link, only the embed url and the admi
     const bad = `Acme ${u} (${u})\n${u}`;
     const pilot = pilotRow({
       company_name: bad, fleet_size: bad, truck_size: bad, contact_name: bad, contact_title: bad, contact_email: bad,
-      contact_phone: bad, fms_provider: bad, website: u, application_notes: bad, notes: bad,
+      contact_phone: bad, fms_provider: bad, website: u, application_notes: bad, notes: bad, ...newFormText(bad),
     });
     const embeds = [
       pilotEmbed(pilot).embeds[0],
@@ -474,6 +499,7 @@ Deno.test("Slack: bare domains, www., emails and channel names in row text are o
     pilotNotice(pilotRow({
       company_name: bad, fleet_size: bad, truck_size: bad, contact_name: bad, contact_title: bad, contact_email: bad,
       contact_phone: bad, fms_provider: bad, website: bad, application_notes: `${bad}\n${bad}`, notes: bad,
+      ...newFormText(bad), primary_lanes: `${bad}\n${bad}`,
     })),
     loiNotice(loiRow({ participant_name: bad, participant_company: bad, participant_title: bad, fleet_size: bad, initials: bad })),
     contactNotice(contactRow({ name: bad, email: bad, organization: bad, message: `${bad}\n${bad}` })),
@@ -538,8 +564,9 @@ Deno.test("Slack: the first block is our own text, the notice kind and the admin
   }
   // Every field is still posted, each in a block of its own after ours.
   assertEquals(slackTexts(pilot).slice(1), [
-    "*Company:* Acme Freight", "*Fleet size:* 40", "*Truck class:* Class 8", "*Contact:* Dana Lee",
-    "*Email:* dana@example.com", "*FMS:* Samsara", "*Website:* acme.example", "*Applicant notes:*\n> Hi", "*Admin notes:*\n> Call Tue",
+    "*Company:* Acme Freight", "*Trucks:* 40", "*ELD or telematics:* Samsara",
+    "*Sites or lanes:*\n> Laredo yard; I-35 Laredo to Dallas", "*Truck class:* Class 8", "*Contact:* Dana Lee",
+    "*Email:* dana@example.com", "*Website:* acme.example", "*Applicant notes:*\n> Hi", "*Admin notes:*\n> Call Tue",
   ]);
 });
 
@@ -548,6 +575,7 @@ Deno.test("Slack: a desktop notification, which reads the blocks' text fields, s
     pilotNotice(pilotRow({
       company_name: SPOOF, fleet_size: SPOOF, truck_size: SPOOF, contact_name: SPOOF, contact_title: SPOOF, contact_email: SPOOF,
       contact_phone: SPOOF, fms_provider: SPOOF, website: SPOOF, application_notes: `${SPOOF}\n${SPOOF}`, notes: SPOOF,
+      ...newFormText(SPOOF), primary_lanes: `${SPOOF}\n${SPOOF}`,
     })),
     // The reviewer's case: a forged instruction as the LOI signer's name.
     loiNotice(loiRow({ participant_name: SPOOF, participant_company: SPOOF, participant_title: SPOOF, fleet_size: SPOOF, initials: SPOOF })),
@@ -651,8 +679,8 @@ Deno.test("a pilot application keeps the contact's phone, title and the applican
 
   const fields: Row[] = d.posts[0].body.embeds[0].fields;
   assertEquals(fields.map((f) => f.name), [
-    "Company", "Fleet size", "Truck class", "Contact", "Title", "Email", "Phone", "FMS", "Website",
-    "Applicant notes", "Admin notes",
+    "Company", "Trucks", "ELD or telematics", "Sites or lanes", "Truck class", "Contact", "Title", "Email", "Phone",
+    "Website", "Applicant notes", "Admin notes",
   ]);
   const value = (name: string) => fields.find((f) => f.name === name)!.value;
   // Escaped like the other applicant text: no masked link, heading, bold or mention.
@@ -688,12 +716,218 @@ Deno.test("the applicant's text on a pilot application is capped", () => {
 
 Deno.test("missing, null and blank contact details add no fields", () => {
   const names = (row: Row) => pilotEmbed(row).embeds[0].fields.map((f: Row) => f.name);
-  const base = ["Company", "Fleet size", "Truck class", "Contact", "Email", "FMS", "Website"];
+  const base = ["Company", "Trucks", "ELD or telematics", "Sites or lanes", "Truck class", "Contact", "Email", "Website"];
   assertEquals(names(pilotRow()), base);
   assertEquals(names(pilotRow({ contact_phone: "  ", contact_title: "", application_notes: "\n" })), base);
+  // The same for the optional answers from 026, and for a truck class, which
+  // /apply no longer asks for.
+  assertEquals(
+    names(pilotRow({
+      data_authorizer_name: " ", data_authorizer_email: "", safety_contact_name: "\n", safety_contact_email: null,
+      tablet_model: "  ", tablet_count: null, tablet_management: null,
+    })),
+    base,
+  );
+  assertEquals(names(pilotRow({ truck_size: " " })), base.filter((n) => n !== "Truck class"));
   // A row read before the columns were selected has no such keys at all.
   const { contact_phone: _p, contact_title: _t, application_notes: _n, ...old } = pilotRow();
   assertEquals(names(old), base);
+});
+
+Deno.test("a pilot post carries every answer from the new form, in Discord and in Slack", async () => {
+  const row = pilotRow({
+    truck_size: null,
+    website: null,
+    fleet_size: "1200",
+    truck_count: 1200,
+    fms_provider: "Other",
+    fms_other: "Fleet Complete",
+    primary_lanes: "Laredo yard\nI-35 Laredo to Dallas",
+    data_authorizer_name: "Ira Ops",
+    data_authorizer_email: "ira@acme.example",
+    safety_contact_name: "Sam Safety",
+    safety_contact_email: "sam@acme.example",
+    tablet_model: "Galaxy Tab Active5",
+    tablet_count: 120,
+    tablet_management: "fleet_mdm",
+  });
+  const d = fake({ env: { ...ENV, ...SLACK_ENV }, rows: { pilot_applications: row } });
+  const { body } = await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  assertEquals(body, { ok: true, table: "pilot_applications" });
+  for (const col of [
+    "truck_count", "fms_other", "primary_lanes", "data_authorizer_name", "data_authorizer_email",
+    "safety_contact_name", "safety_contact_email", "tablet_model", "tablet_count", "tablet_management",
+  ]) {
+    assert(COLUMNS.pilot_applications.split(/,\s*/).includes(col), col);
+  }
+
+  const embed = d.posts[0].body.embeds[0];
+  assertEquals(embed.fields.map((f: Row) => [f.name, f.value, f.inline]), [
+    ["Company", "Acme Freight", true],
+    ["Trucks", "1,200", true],
+    ["ELD or telematics", "Other \\(Fleet Complete\\)", true],
+    ["Sites or lanes", "Laredo yard\nI-35 Laredo to Dallas", false],
+    ["Contact", "Dana Lee", true],
+    ["Email", "dana@example.com", true],
+    ["Authorizes data access", "Ira Ops, ira@acme.example", false],
+    ["Safety contact", "Sam Safety, sam@acme.example", false],
+    ["Tablets", "120 tablets, Galaxy Tab Active5, managed through the fleet's MDM", false],
+  ]);
+
+  const msg = d.posts[1].body;
+  assertSlackSafe(msg);
+  assertEquals(slackTexts(msg).slice(1), [
+    "*Company:* Acme Freight",
+    "*Trucks:* 1,200",
+    "*ELD or telematics:* Other (Fleet Complete)",
+    "*Sites or lanes:*\n> Laredo yard\n> I-35 Laredo to Dallas",
+    "*Contact:* Dana Lee",
+    "*Email:* dana@example.com",
+    "*Authorizes data access:* Ira Ops, ira@acme.example",
+    "*Safety contact:* Sam Safety, sam@acme.example",
+    "*Tablets:* 120 tablets, Galaxy Tab Active5, managed through the fleet's MDM",
+  ]);
+  assertEquals(slackLinks(slackBody(msg)), [slackLink("https://cruzemaps.com/admin")]);
+
+  // One tablet, a count of zero, and each way of managing them.
+  const tablets = (over: Row) => pilotEmbed(pilotRow(over)).embeds[0].fields.find((f: Row) => f.name === "Tablets")?.value;
+  assertEquals(tablets({ tablet_count: 1 }), "1 tablet");
+  assertEquals(tablets({ tablet_count: 0, tablet_management: "cruze" }), "0 tablets, managed by Cruze");
+  assertEquals(tablets({ tablet_management: "manual" }), "managed by hand");
+  // A value the database would refuse adds nothing, even one an object would know.
+  for (const tablet_management of ["unsure", "constructor", "__proto__", "toString"]) {
+    assertEquals(tablets({ tablet_management }), undefined, tablet_management);
+  }
+  // Just a name or just an email is shown alone.
+  const person = pilotEmbed(pilotRow({ safety_contact_email: "sam@acme.example" })).embeds[0].fields
+    .find((f: Row) => f.name === "Safety contact")?.value;
+  assertEquals(person, "sam@acme.example");
+});
+
+Deno.test("a pilot post from the old form says what is missing", async () => {
+  const row = pilotRow({ fleet_size: "101-500", truck_count: null, fms_provider: null, fms_other: "x", primary_lanes: null });
+  const d = fake({ env: { ...ENV, ...SLACK_ENV }, rows: { pilot_applications: row } });
+  await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  const fields: Row[] = d.posts[0].body.embeds[0].fields;
+  const field = (name: string) => fields.find((f) => f.name === name)?.value;
+  assertEquals(field("Trucks"), "101-500");
+  assertEquals(field("ELD or telematics"), "(not given)");
+  assertEquals(field("Sites or lanes"), "(not given)");
+  for (const name of ["Authorizes data access", "Safety contact", "Tablets"]) assertEquals(field(name), undefined);
+  const slack = slackTexts(d.posts[1].body);
+  assert(slack.includes("*Trucks:* 101-500"));
+  assert(slack.includes("*ELD or telematics:* (not given)"));
+  assert(slack.includes("*Sites or lanes:* (not given)"));
+  // No truck count and no size bucket either.
+  const none = pilotEmbed(pilotRow({ fleet_size: "  ", truck_count: null })).embeds[0].fields;
+  assertEquals(none.find((f: Row) => f.name === "Trucks").value, "(not given)");
+});
+
+// The review's case (154-1): an applicant's *bold* or bare link in any of the
+// new answers. Slack shows it as text, with look-alike asterisks and no scheme,
+// only in verbatim context blocks, and links nothing but our admin link;
+// Discord escapes the asterisks and puts the link in inline code.
+Deno.test("an applicant's *bold* or bare link in a new answer is escaped in Slack and in Discord", async () => {
+  const typed = "*URGENT* sign in at https://evil.example/login or www.evil.example now";
+  const row = pilotRow({
+    ...newFormText(typed),
+    fms_provider: "Other",
+    fleet_size: typed,
+    tablet_count: 3,
+    tablet_management: "cruze",
+  });
+  const d = fake({ env: { ...ENV, ...SLACK_ENV }, rows: { pilot_applications: row } });
+  await call(d, { type: "INSERT", table: "pilot_applications", record: { id: ID } });
+  const names = ["Trucks", "ELD or telematics", "Sites or lanes", "Authorizes data access", "Safety contact", "Tablets"];
+
+  const embed = d.posts[0].body.embeds[0];
+  const value = (name: string) => embed.fields.find((f: Row) => f.name === name).value;
+  const discordTyped = "\\*URGENT\\* sign in at `https://evil.example/login` or `www.evil.example` now";
+  assertEquals(value("Trucks"), discordTyped);
+  assertEquals(value("ELD or telematics"), `Other \\(${discordTyped}\\)`);
+  assertEquals(value("Sites or lanes"), discordTyped);
+  assertEquals(value("Authorizes data access"), `${discordTyped}, ${discordTyped}`);
+  assertEquals(value("Safety contact"), `${discordTyped}, ${discordTyped}`);
+  assertEquals(value("Tablets"), `3 tablets, ${discordTyped}, managed by Cruze`);
+  for (const name of names) assertNoDiscordLink(value(name), name);
+  assertEquals(embed.url, "https://cruzemaps.com/admin");
+  assertEquals(d.posts[0].body.allowed_mentions, { parse: [] });
+
+  const msg = d.posts[1].body;
+  assertSlackSafe(msg);
+  assertEquals(msg.blocks[0].text.text, slackHead(pilotNotice(row)));
+  const slackTyped = "\u2217URGENT\u2217 sign in at evil.example/login or www.evil.example now";
+  const texts = slackTexts(msg);
+  assert(texts.includes(`*Trucks:* ${slackTyped}`), texts.join("\n"));
+  assert(texts.includes(`*ELD or telematics:* Other (${slackTyped})`));
+  assert(texts.includes(`*Sites or lanes:*\n> ${slackTyped}`));
+  assert(texts.includes(`*Authorizes data access:* ${slackTyped}, ${slackTyped}`));
+  assert(texts.includes(`*Safety contact:* ${slackTyped}, ${slackTyped}`));
+  assert(texts.includes(`*Tablets:* 3 tablets, ${slackTyped}, managed by Cruze`));
+  // Nothing typed is bold: the only asterisks are those around our labels.
+  for (const t of texts.slice(1)) assertEquals(t.replace(/^\*[A-Za-z ]+:\*/, "").includes("*"), false, t);
+  // The only link is ours, no scheme is left, and the typed text sits only in
+  // verbatim context blocks, so Slack links none of it on its own.
+  const body = slackBody(msg);
+  assertEquals(slackLinks(body), [slackLink("https://cruzemaps.com/admin")]);
+  assert(!BARE_URL.test(body.replace(slackLink("https://cruzemaps.com/admin"), "")));
+  for (const b of msg.blocks.slice(1)) {
+    if (b.elements[0].text.includes("evil")) assertEquals([b.type, b.elements[0].verbatim], ["context", true]);
+  }
+  for (const word of ["URGENT", "evil"]) {
+    assert(!msg.text.includes(word));
+    assert(!msg.blocks[0].text.text.includes(word));
+  }
+});
+
+// The longest answers /apply takes: names 200 and emails 320 (026 holds the
+// database to the same), the provider's name 200, the tablet model 200, sites
+// or lanes 1,000. Company, contact and phone have no cap on the form, so they
+// get the length of a long real one.
+const longestNewForm = (ch: string): Row => pilotRow({
+  company_name: ch.repeat(200),
+  contact_name: ch.repeat(200),
+  contact_email: ch.repeat(310) + "@example.com",
+  contact_phone: ch.repeat(40),
+  fms_provider: "Other",
+  fms_other: ch.repeat(200),
+  primary_lanes: ch.repeat(1000),
+  data_authorizer_name: ch.repeat(200),
+  data_authorizer_email: ch.repeat(308) + "@example.com",
+  safety_contact_name: ch.repeat(200),
+  safety_contact_email: ch.repeat(308) + "@example.com",
+  tablet_model: ch.repeat(200),
+  tablet_count: 1000000,
+  tablet_management: "manual",
+  website: "https://" + ch.repeat(300) + ".example",
+});
+
+Deno.test("Slack and Discord keep every field and the admin link when each answer is as long as the form allows", () => {
+  // "&" grows fivefold for Slack (&amp;) and "*" doubles for Discord (\*).
+  for (const ch of ["x", "&", "*", "<"]) {
+    const notice = pilotNotice(longestNewForm(ch));
+    const labels = notice.fields.map((f) => f.name);
+    assertEquals(labels, [
+      "Company", "Trucks", "ELD or telematics", "Sites or lanes", "Truck class", "Contact", "Email", "Phone",
+      "Authorizes data access", "Safety contact", "Tablets", "Website",
+    ]);
+
+    const msg = slackMessage(notice);
+    assertSlackSafe(msg);
+    assert(slackTexts(msg).join("").length <= SLACK_MAX_CHARS, ch);
+    assertEquals(slackTexts(msg)[0], slackHead(notice));
+    assertEquals(slackTexts(msg).slice(1).map((t) => t.match(/^\*([^*]*):\*/)?.[1]), labels, ch);
+    // No cut leaves half an entity behind.
+    for (const t of slackTexts(msg)) assert(!/&[a-z]{0,3}…/.test(t), t);
+
+    const embed = discordMessage(notice).embeds[0];
+    assert(embedChars(embed) <= DISCORD_EMBED_MAX_CHARS, `${ch} ${embedChars(embed)}`);
+    assertEquals(embed.fields.map((f: Row) => f.name), labels);
+    for (const f of embed.fields) assert(f.value.length >= 1 && f.value.length <= 1024, f.name);
+  }
+  // Plain letters fit Discord whole: nothing is cut below its own cap.
+  const sites = discordMessage(pilotNotice(longestNewForm("x"))).embeds[0].fields.find((f: Row) => f.name === "Sites or lanes");
+  assertEquals(sites.value, "x".repeat(PILOT_SITES_CHARS));
 });
 
 // Every Slack line that starts a field, and every link, in a Slack message.
@@ -708,16 +942,25 @@ const FORGED = "\n*Admin tab:* https://evil.example\r\n> *Admin portal:* <https:
 Deno.test("Slack: applicant text cannot forge a field or a link on a pilot application", () => {
   const cols = [
     "company_name", "fleet_size", "truck_size", "contact_name", "contact_title", "contact_email",
-    "contact_phone", "fms_provider", "website", "application_notes", "notes",
+    "contact_phone", "fms_provider", "fms_other", "primary_lanes", "data_authorizer_name", "data_authorizer_email",
+    "safety_contact_name", "safety_contact_email", "tablet_model", "website", "application_notes", "notes",
   ];
   const expected = [
-    "*🚛 New pilot application*", "*Admin portal:*", "*Company:*", "*Fleet size:*", "*Truck class:*", "*Contact:*",
-    "*Title:*", "*Email:*", "*Phone:*", "*FMS:*", "*Website:*", "*Applicant notes:*", "*Admin notes:*",
+    "*🚛 New pilot application*", "*Admin portal:*", "*Company:*", "*Trucks:*", "*ELD or telematics:*",
+    "*Sites or lanes:*", "*Truck class:*", "*Contact:*", "*Title:*", "*Email:*", "*Phone:*",
+    "*Authorizes data access:*", "*Safety contact:*", "*Tablets:*", "*Website:*", "*Applicant notes:*",
+    "*Admin notes:*",
   ];
+  // Every optional field is filled, and truck_count is left out so the Trucks
+  // field shows fleet_size, which is text.
+  const base = {
+    truck_count: null, contact_title: "VP", contact_phone: "555", application_notes: "Hi", notes: "x",
+    data_authorizer_name: "Ira", safety_contact_name: "Sam", tablet_model: "Tab",
+  };
   // The forged text in one column at a time, then in all of them at once.
   const rows = [
-    ...cols.map((col) => pilotRow({ contact_title: "VP", contact_phone: "555", application_notes: "Hi", notes: "x", [col]: `Acme${FORGED}` })),
-    pilotRow(Object.fromEntries(cols.map((col) => [col, `Acme${FORGED}`]))),
+    ...cols.map((col) => pilotRow({ ...base, [col]: `Acme${FORGED}` })),
+    pilotRow({ ...base, ...Object.fromEntries(cols.map((col) => [col, `Acme${FORGED}`])) }),
   ];
   for (const row of rows) {
     const msg = slackMessage(pilotNotice(row));
@@ -781,6 +1024,7 @@ const hugeRow = (ch: string, n = 20000): Row => {
   return pilotRow({
     company_name: big, fleet_size: big, truck_size: big, contact_name: big, contact_title: big, contact_email: big,
     contact_phone: big, fms_provider: big, website: big, application_notes: `${big}\n${big}`, notes: big,
+    ...newFormText(big), primary_lanes: `${big}\n${big}`, tablet_count: 1000000, tablet_management: "cruze",
   });
 };
 
@@ -874,6 +1118,10 @@ Deno.test("the raw cap never leaves half an emoji, even when the rest of the val
   assertEquals([line.length, lines.length], [RAW_MAX_CHARS + 1, RAW_MAX_CHARS + 1]);
   const notices: Notice[] = [
     pilotNotice(pilotRow({ company_name: line, contact_title: line, application_notes: lines, notes: lines })),
+    pilotNotice(pilotRow({
+      ...newFormText(line), fleet_size: line, fms_provider: line, primary_lanes: lines, tablet_count: 2,
+      tablet_management: "cruze",
+    })),
     loiNotice(loiRow({ participant_name: line, participant_company: line })),
     contactNotice(contactRow({ name: line, organization: line, message: lines })),
   ];

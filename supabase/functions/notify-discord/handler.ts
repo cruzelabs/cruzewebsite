@@ -40,11 +40,15 @@
 export const TABLES = ["pilot_applications", "loi_signatures", "contact_messages"] as const;
 export type Table = (typeof TABLES)[number];
 
-// Columns read back for each table. Nothing else from the row is used.
+// Columns read back for each table. Nothing else from the row is used. The
+// pilot_applications list names columns from migration 026, so apply 026
+// before deploying this function.
 export const COLUMNS: Record<Table, string> = {
   pilot_applications:
-    "id, company_name, truck_size, fleet_size, notes, contact_name, contact_email, contact_phone, contact_title, " +
-    "application_notes, fms_provider, website, created_at",
+    "id, company_name, truck_size, fleet_size, truck_count, notes, contact_name, contact_email, contact_phone, " +
+    "contact_title, application_notes, fms_provider, fms_other, primary_lanes, data_authorizer_name, " +
+    "data_authorizer_email, safety_contact_name, safety_contact_email, tablet_model, tablet_count, " +
+    "tablet_management, website, created_at",
   loi_signatures:
     "id, participant_name, participant_company, participant_title, fleet_size, initials, signed_at, created_at",
   contact_messages: "id, name, email, organization, message, created_at",
@@ -69,6 +73,8 @@ export const SUBJECT_CHARS = 200;
 export const PILOT_PHONE_CHARS = 64;
 export const PILOT_TITLE_CHARS = 128;
 export const PILOT_APPLICANT_NOTES_CHARS = 1000;
+// The /apply box for sites or lanes takes 1,000 characters.
+export const PILOT_SITES_CHARS = 1000;
 
 export const SITE_URL = "https://cruzemaps.com";
 export const ADMIN_MESSAGES_URL = `${SITE_URL}/admin?tab=messages`;
@@ -533,24 +539,81 @@ const slackRowText = (text: string): Row => ({
 const footer = (label: string, row: Row, at: unknown) =>
   `${label} ${String(row.id).slice(0, 8)} · ${new Date(at as string).toLocaleString("en-US")}`;
 
+// The /apply answers from migration 026, as raw text for the renderers to
+// escape. Each one is null when the row has nothing to show.
+
+// Row text with its ends trimmed, or null when there is none.
+function given(value: unknown): string | null {
+  return raw(value).trim() || null;
+}
+
+// The exact count from /apply, else the size bucket an older row holds.
+function trucksText(row: Row): string | null {
+  if (Number.isInteger(row.truck_count)) return row.truck_count.toLocaleString("en-US");
+  return given(row.fleet_size);
+}
+
+// "Samsara", or "Other (Fleet Complete)".
+function providerText(row: Row): string | null {
+  const provider = given(row.fms_provider);
+  if (!provider) return null;
+  const other = given(row.fms_other);
+  return other ? `${provider} (${other})` : provider;
+}
+
+// "Name, email", or whichever of the two is given.
+function personText(name: unknown, email: unknown): string | null {
+  return [given(name), given(email)].filter(Boolean).join(", ") || null;
+}
+
+// Who manages the tablets (tablet_management) as staff read it. A Map, so a
+// value such as "constructor" finds nothing.
+const TABLET_MANAGERS = new Map<string, string>([
+  ["fleet_mdm", "managed through the fleet's MDM"],
+  ["cruze", "managed by Cruze"],
+  ["manual", "managed by hand"],
+]);
+
+// "120 tablets, Galaxy Tab Active5, managed through the fleet's MDM".
+function tabletsText(row: Row): string | null {
+  const parts: string[] = [];
+  if (Number.isInteger(row.tablet_count)) {
+    parts.push(`${row.tablet_count.toLocaleString("en-US")} ${row.tablet_count === 1 ? "tablet" : "tablets"}`);
+  }
+  const model = given(row.tablet_model);
+  if (model) parts.push(model);
+  const manager = TABLET_MANAGERS.get(String(row.tablet_management));
+  if (manager) parts.push(manager);
+  return parts.length ? parts.join(", ") : null;
+}
+
 export function pilotNotice(row: Row): Notice {
+  // Trucks, provider and sites always show, so staff see at once what a pilot
+  // still needs. Every value here is row text (the applicant's, through the
+  // helpers above), so both renderers escape it like any other field.
   const fields: NoticeField[] = [
     { name: "Company", value: row.company_name, empty: "(unspecified)", inline: true },
-    { name: "Fleet size", value: row.fleet_size, empty: "(unspecified)", inline: true },
-    { name: "Truck class", value: row.truck_size, empty: "(unspecified)", inline: true },
+    { name: "Trucks", value: trucksText(row), empty: "(not given)", inline: true },
+    { name: "ELD or telematics", value: providerText(row), empty: "(not given)", inline: true },
+    { name: "Sites or lanes", value: row.primary_lanes, empty: "(not given)", block: true, max: PILOT_SITES_CHARS },
   ];
   // Null, missing and blank columns add no field.
   const add = (name: string, value: unknown, more: Partial<NoticeField> = {}) => {
     if (value != null && String(value).trim() !== "") fields.push({ name, value, inline: !more.block, ...more });
   };
+  // /apply no longer asks for the truck class; older rows have one.
+  add("Truck class", row.truck_size);
   add("Contact", row.contact_name);
   add("Title", row.contact_title, { max: PILOT_TITLE_CHARS });
   add("Email", row.contact_email);
   add("Phone", row.contact_phone, { max: PILOT_PHONE_CHARS });
-  add("FMS", row.fms_provider);
+  add("Authorizes data access", personText(row.data_authorizer_name, row.data_authorizer_email), { inline: false });
+  add("Safety contact", personText(row.safety_contact_name, row.safety_contact_email), { inline: false });
+  add("Tablets", tabletsText(row), { inline: false });
   add("Website", row.website, { inline: false });
-  // application_notes is what the applicant typed on /apply; notes is the
-  // staff-only column.
+  // application_notes is what the applicant typed on the older /apply form
+  // (the title and website are from there too); notes is the staff-only
+  // column.
   add("Applicant notes", row.application_notes, { block: true, max: PILOT_APPLICANT_NOTES_CHARS });
   add("Admin notes", row.notes, { block: true });
 

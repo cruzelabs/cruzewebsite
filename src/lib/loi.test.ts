@@ -27,6 +27,15 @@ describe("renderLOIText", () => {
     expect(text).toContain("Signed (electronic): 2026-06-21");
   });
 
+  it("names the exact truck count in the sentence migration 026's LOI policy looks for", () => {
+    // supabase/migrations/20261112_026_application_fields.sql refuses an LOI
+    // for a new-form application unless its text contains this sentence with
+    // the application's truck_count. Change the policy with the sentence.
+    expect(renderLOIText({ ...baseFields, fleetSize: "172" })).toContain(
+      "Fleet Integration: 172 vehicles shall be enrolled."
+    );
+  });
+
   it("includes the performance-fee range from the shared constants", () => {
     const text = renderLOIText(baseFields);
     expect(text).toContain(

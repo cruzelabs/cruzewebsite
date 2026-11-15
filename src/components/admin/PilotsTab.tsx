@@ -17,37 +17,34 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { AlertTriangle } from "lucide-react";
+import { applicationAnswers, trucksText, type PilotApplicationRow } from "@/lib/pilotApplication";
 
 const LIFECYCLE = ["pending", "in_review", "approved", "onboarding", "active", "denied", "archived"] as const;
 type LifecycleState = (typeof LIFECYCLE)[number];
 
-type PilotApp = {
-  id: string;
-  user_id: string;
-  company_name: string | null;
-  truck_size: string | null;
-  fleet_size: string | null;
-  status: LifecycleState;
-  notes: string | null;
-  fleet_visible_message: string | null;
-  contact_name: string | null;
-  contact_email: string | null;
-  contact_phone: string | null;
-  contact_title: string | null;
-  website: string | null;
-  primary_lanes: string | null;
-  fms_provider: string | null;
-  fms_other: string | null;
-  application_notes: string | null;
-  created_at: string;
+type PilotApp = Omit<PilotApplicationRow, "status" | "reviewed_at"> & { status: LifecycleState };
+
+const NO_NEW_ANSWERS = {
+  truck_count: null,
+  data_authorizer_name: null,
+  data_authorizer_email: null,
+  tablet_model: null,
+  tablet_count: null,
+  tablet_management: null,
+  safety_contact_name: null,
+  safety_contact_email: null,
 };
 
 const DEMO_APPS: PilotApp[] = [
   {
-    id: "p1", user_id: "u1", company_name: "Swift Transport Logistics", truck_size: "Class 8", fleet_size: "1500",
+    id: "p1", user_id: "u1", company_name: "Swift Transport Logistics", truck_size: null, fleet_size: "1500",
     status: "pending", notes: null, fleet_visible_message: null, contact_name: "Lori Chen", contact_email: "lori@swift.com",
-    contact_phone: null, contact_title: "VP Ops", website: null, primary_lanes: null, fms_provider: "Samsara", fms_other: null,
-    application_notes: null, created_at: "2026-04-30T10:00:00Z",
+    contact_phone: null, contact_title: "VP Ops", website: null, primary_lanes: "Phoenix yard; I-10 Phoenix to LA",
+    fms_provider: "Samsara", fms_other: null, application_notes: null, created_at: "2026-04-30T10:00:00Z",
+    ...NO_NEW_ANSWERS,
+    truck_count: 1500, data_authorizer_name: "Dee Fleetadmin", data_authorizer_email: "dee@swift.com",
+    safety_contact_name: "Ray Safety", safety_contact_email: "ray@swift.com",
+    tablet_model: "Galaxy Tab Active5", tablet_count: 1400, tablet_management: "fleet_mdm",
   },
   {
     id: "p2", user_id: "u2", company_name: "National Carrier Partners", truck_size: "Class 6", fleet_size: "350",
@@ -55,6 +52,7 @@ const DEMO_APPS: PilotApp[] = [
     contact_name: "Sam Patel", contact_email: "ops@national.com", contact_phone: null, contact_title: null,
     website: null, primary_lanes: "Dallas → Houston", fms_provider: "Geotab", fms_other: null, application_notes: null,
     created_at: "2026-04-22T10:00:00Z",
+    ...NO_NEW_ANSWERS,
   },
   {
     id: "p3", user_id: "u3", company_name: "Alpha Freight", truck_size: "Class 8", fleet_size: "2000",
@@ -62,6 +60,7 @@ const DEMO_APPS: PilotApp[] = [
     contact_name: "Alex Kim", contact_email: "alex@alpha.com", contact_phone: null, contact_title: "COO",
     website: "https://alpha.example", primary_lanes: null, fms_provider: "Motive", fms_other: null, application_notes: null,
     created_at: "2026-04-15T10:00:00Z",
+    ...NO_NEW_ANSWERS,
   },
 ];
 
@@ -233,8 +232,10 @@ export default function PilotsTab({
                 </div>
                 <button onClick={() => setEditing(a)} className="text-left w-full">
                   <div className="flex flex-wrap gap-3 text-xs text-white/50 mb-3 items-center">
-                    <span className="inline-flex items-center gap-1"><Truck size={12} /> {a.truck_size || "N/A"}</span>
-                    <span>{a.fleet_size ? `${a.fleet_size} vehicles` : "N/A"}</span>
+                    <span className="inline-flex items-center gap-1">
+                      <Truck size={12} /> {trucksText(a) ? `${trucksText(a)} trucks` : "N/A"}
+                    </span>
+                    {a.truck_size && <span>{a.truck_size}</span>}
                     <span>· {new Date(a.created_at).toLocaleDateString()}</span>
                     {signedPilotIds.has(a.id) ? (
                       <span className="inline-flex items-center gap-1 text-emerald-400 text-[10px] uppercase tracking-widest font-semibold ml-auto px-2 py-0.5 rounded-full border border-emerald-400/30 bg-emerald-400/5">
@@ -450,13 +451,8 @@ function ApplicantDetails({ app }: { app: PilotApp }) {
     ["Title", app.contact_title],
     ["Phone", app.contact_phone],
     ["Website", app.website],
-    ["Lanes", app.primary_lanes],
-    [
-      "FMS",
-      app.fms_provider
-        ? `${app.fms_provider}${app.fms_other ? ` (${app.fms_other})` : ""}`
-        : null,
-    ],
+    ["Truck class", app.truck_size],
+    ...applicationAnswers(app),
     ["Applicant notes", app.application_notes],
   ].filter(([, v]) => v) as [string, string][];
 

@@ -35,7 +35,7 @@ afterEach(() => {
 
 describe("session draft round-trip", () => {
   it("saveSessionDraft then loadSessionDraft returns the same object", () => {
-    const draft = { companyName: "Acme Freight", fleetSize: "200" } as WizardDraft;
+    const draft = { companyName: "Acme Freight", truckCount: "200" } as WizardDraft;
     saveSessionDraft(draft);
     expect(loadSessionDraft()).toEqual(draft);
   });
@@ -72,19 +72,19 @@ describe("loadWizardDraft merge precedence", () => {
   });
 
   it("merges the server draft over defaults for a signed-in user", async () => {
-    rpc.mockResolvedValueOnce({ data: { companyName: "Server Co", fleetSize: "150" }, error: null });
+    rpc.mockResolvedValueOnce({ data: { companyName: "Server Co", truckCount: "150" }, error: null });
     const draft = await loadWizardDraft("user-1", "ops@acme.com");
     expect(rpc).toHaveBeenCalledWith("get_pilot_draft");
     expect(draft.companyName).toBe("Server Co");
-    expect(draft.fleetSize).toBe("150");
+    expect(draft.truckCount).toBe("150");
   });
 
   it("lets the session draft win over the server draft (most recent local edit)", async () => {
-    rpc.mockResolvedValueOnce({ data: { companyName: "Server Co", fleetSize: "150" }, error: null });
+    rpc.mockResolvedValueOnce({ data: { companyName: "Server Co", truckCount: "150" }, error: null });
     saveSessionDraft({ companyName: "Local Co" } as WizardDraft);
     const draft = await loadWizardDraft("user-1", undefined);
     expect(draft.companyName).toBe("Local Co"); // session overrides server
-    expect(draft.fleetSize).toBe("150"); // server field with no local override survives
+    expect(draft.truckCount).toBe("150"); // server field with no local override survives
   });
 
   it("an empty-object server draft does not wipe a local session edit", async () => {
@@ -98,7 +98,7 @@ describe("loadWizardDraft merge precedence", () => {
     const draft = await loadWizardDraft("user-1", "ops@acme.com");
     expect(rpc).toHaveBeenCalledWith("get_pilot_draft");
     expect(draft.companyName).toBe("Local Co"); // session edit survives an empty server draft
-    expect(draft.fleetSize).toBe(""); // untouched default
+    expect(draft.truckCount).toBe(""); // untouched default
   });
 
   it("NEVER restores loiAgreed/loiInitials, even if a draft tries to smuggle them in", async () => {

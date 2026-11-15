@@ -31,6 +31,10 @@ type PilotApp = Omit<PilotApplicationRow, "status" | "reviewed_at"> & {
   organization_id: string | null;
 };
 
+// Another organization whose name is the same company as one the approval
+// just created.
+type SameNameOrganization = { id: string; name: string; org_type: string | null; status: string | null };
+
 // What approve_pilot_application (migration 027) returns.
 type ApprovalResult = {
   application_id: string;
@@ -39,7 +43,10 @@ type ApprovalResult = {
   organization_name: string;
   organization_created: boolean;
   owner_id: string;
+  same_name_organizations?: SameNameOrganization[];
 };
+
+type NotesAndMessage = { notes: string | null; fleet_visible_message: string | null };
 
 /**
  * What approve_pilot_application accepts: a pending or in-review application,
@@ -378,6 +385,8 @@ function ManagePilotDialog({
   // The organization's own name, for the portal step. It can differ from the
   // company on the application when the applicant already had one.
   const [org, setOrg] = useState<{ id: string; name: string } | null>(null);
+  // Organizations with the same company name as the one this approval created.
+  const [sameName, setSameName] = useState<SameNameOrganization[]>([]);
   const portalStepRef = useRef<HTMLDivElement>(null);
   const canApprove = canBeApproved(app);
   const showPortalStep = !!app.organization_id && APPROVED_STAGES.includes(app.status);
@@ -422,13 +431,26 @@ function ManagePilotDialog({
     })();
   }, [app.id, isDemo]);
 
+  // The row's notes and message as they are now, or null if it cannot be read.
+  const readNotesAndMessage = async (): Promise<NotesAndMessage | null> => {
+    const { data, error } = await supabase
+      .from("pilot_applications")
+      .select("notes, fleet_visible_message")
+      .eq("id", app.id)
+      .maybeSingle();
+    return error || !data ? null : (data as NotesAndMessage);
+  };
+
   // The approval: approve_pilot_application (migration 027) creates the
   // fleet's organization and ties the application and the applicant to it.
   // Changed notes and message are saved first, without the status or the
   // review stamp, so the approval email that the status change sends already
   // carries the message. If the approval is refused they are put back, so the
   // fleet never sees a message written for an approval that did not happen;
-  // the text stays in the dialog. Returns null when nothing was approved.
+  // the text stays in the dialog. What goes back is what the row held just
+  // before that save, read then, not the copy from when the dialog opened, so
+  // another admin's edit made while this dialog was open is not undone.
+  // Returns null when nothing was approved.
   const runApproval = async (): Promise<ApprovalResult | null> => {
     const message = fleetMessage.trim() || null;
     if (isDemo) {
@@ -439,15 +461,19 @@ function ManagePilotDialog({
         organization_name: app.company_name?.trim() || "Demo Fleet",
         organization_created: !app.organization_id,
         owner_id: app.user_id,
+        same_name_organizations: [],
       };
     }
-    const before = { notes: app.notes, fleet_visible_message: app.fleet_visible_message };
+    const saved: NotesAndMessage = { notes, fleet_visible_message: message };
     const changed = notes !== (app.notes || "") || message !== (app.fleet_visible_message?.trim() || null);
+    let before: NotesAndMessage | null = null;
     if (changed) {
-      const { error } = await supabase
-        .from("pilot_applications")
-        .update({ notes, fleet_visible_message: message })
-        .eq("id", app.id);
+      before = await readNotesAndMessage();
+      if (!before) {
+        toast.error("Not approved: the application could not be read. Nothing was saved; try again.");
+        return null;
+      }
+      const { error } = await supabase.from("pilot_applications").update(saved).eq("id", app.id);
       if (error) {
         toast.error(error.message);
         return null;
@@ -455,24 +481,44 @@ function ManagePilotDialog({
     }
     const { data, error } = await supabase.rpc("approve_pilot_application", { application_id: app.id });
     if (error) {
-      let undo = "";
-      if (changed) {
-        const { error: undoError } = await supabase.from("pilot_applications").update(before).eq("id", app.id);
-        undo = undoError
-          ? ` The new message could not be taken back (${undoError.message}); clear it and save.`
-          : " Notes and message were not saved; your text is still here.";
-      }
+      const undo = before ? await putBack(before, saved) : "";
       toast.error(`Not approved: ${error.message}${undo}`);
       return null;
     }
     return data as ApprovalResult;
   };
 
+  // After a refused approval: re-read the row and put `before` back into each
+  // field the save changed and the row still holds as saved. A field someone
+  // else has changed since is left as they wrote it. Returns the toast's
+  // sentence about it.
+  const putBack = async (before: NotesAndMessage, saved: NotesAndMessage): Promise<string> => {
+    const now = await readNotesAndMessage();
+    if (!now) return " The new message could not be taken back (the application could not be read); clear it and save.";
+    const back: Partial<NotesAndMessage> = {};
+    const theirs: string[] = [];
+    for (const [key, label] of [["notes", "notes"], ["fleet_visible_message", "message"]] as const) {
+      if (before[key] === saved[key]) continue;
+      if (now[key] === saved[key]) back[key] = before[key];
+      else theirs.push(label);
+    }
+    if (Object.keys(back).length) {
+      const { error } = await supabase.from("pilot_applications").update(back).eq("id", app.id);
+      if (error) return ` The new message could not be taken back (${error.message}); clear it and save.`;
+    }
+    return theirs.length
+      ? ` Notes and message were not saved. Someone else changed the ${theirs.join(" and ")} meanwhile, so their text was kept; yours is still here.`
+      : " Notes and message were not saved; your text is still here.";
+  };
+
   const finishApproval = (result: ApprovalResult, finalStatus: LifecycleState) => {
+    const others = result.same_name_organizations ?? [];
     setStatus(finalStatus);
     setOrg({ id: result.organization_id, name: result.organization_name });
+    setSameName(others);
     toast.success(
-      `${isDemo ? "Demo: " : ""}${result.organization_created ? "Approved. The fleet's organization is created." : "Approved."}`
+      `${isDemo ? "Demo: " : ""}${result.organization_created ? "Approved. The fleet's organization is created." : "Approved."}` +
+        (others.length ? " Another organization has the same name: check it before the portal step." : "")
     );
     onUpdated(
       {
@@ -564,7 +610,8 @@ function ManagePilotDialog({
         </DialogHeader>
         <div className="space-y-4 py-4 max-h-[70vh] overflow-y-auto">
           {showPortalStep && (
-            <div ref={portalStepRef}>
+            <div ref={portalStepRef} className="space-y-3">
+              {sameName.length > 0 && <SameNameWarning organizations={sameName} />}
               <PortalNextStep
                 name={org?.id === app.organization_id ? org.name : null}
                 organizationId={app.organization_id}
@@ -642,6 +689,35 @@ function ManagePilotDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// After an approval that created the organization: the other organizations
+// whose name is the same company. The approval joins none of them by name, so
+// a person checks whether one is this fleet before its portal is created.
+function SameNameWarning({ organizations }: { organizations: SameNameOrganization[] }) {
+  const one = organizations.length === 1;
+  return (
+    <div
+      data-testid="same-name-organizations"
+      className="rounded-lg border border-amber-400/30 bg-amber-400/5 p-4 space-y-2"
+    >
+      <div className="flex items-center gap-2 text-sm font-medium text-amber-300">
+        <AlertTriangle size={16} /> Check for a duplicate first
+      </div>
+      <p className="text-xs text-white/60 leading-relaxed">
+        This approval created a new organization, and {one ? "another organization has" : "these organizations have"}{" "}
+        the same company name. If {one ? "it is" : "one is"} this fleet, link the applicant to {one ? "it" : "that one"}{" "}
+        by hand before you run the command below.
+      </p>
+      <ul className="text-xs text-white/80 space-y-1">
+        {organizations.map((o) => (
+          <li key={o.id} className="break-all">
+            {o.name} ({o.org_type ?? "no type"}, {o.status ?? "no status"}): <span className="font-mono">{o.id}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

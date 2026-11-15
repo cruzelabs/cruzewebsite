@@ -24,6 +24,15 @@
 --     city organization, an archived, suspended or admin applicant, a blank
 --     company name, and, with 022's confirm-email switch on, an applicant who
 --     never confirmed their email
+--   * refused with nothing changed: an organization that is archived,
+--     suspended or without a status, named by the profile or the application
+--     (until it is made active again); a prospect one is joined and stays a
+--     prospect. A profile organization "Co." is not the company "Inc", though
+--     both normalize to nothing
+--   * a new organization's result names the other organizations of the same
+--     company ("Dup Freight LLC" for "Dup Freight") and joins none of them; a
+--     name that normalizes to nothing matches none, and a second call or a
+--     joined organization reports none
 --   * the guard trigger: no move into approved, onboarding or active, and no
 --     clearing of the organization there, without an organization (23514),
 --     for an admin's direct update or an insert; rows already there from
@@ -237,11 +246,24 @@ end $$;
 \set u17 '''00000000-0000-0000-0000-000000000c17'''
 \set u18 '''00000000-0000-0000-0000-000000000c18'''
 \set u19 '''00000000-0000-0000-0000-000000000c19'''
+\set u20 '''00000000-0000-0000-0000-000000000c20'''
+\set u21 '''00000000-0000-0000-0000-000000000c21'''
+\set u22 '''00000000-0000-0000-0000-000000000c22'''
+\set u23 '''00000000-0000-0000-0000-000000000c23'''
+\set u24 '''00000000-0000-0000-0000-000000000c24'''
+\set u25 '''00000000-0000-0000-0000-000000000c25'''
+\set u26 '''00000000-0000-0000-0000-000000000c26'''
+\set u27 '''00000000-0000-0000-0000-000000000c27'''
 \set orgx '''30000000-0000-0000-0000-00000000000a'''
 \set orgy '''30000000-0000-0000-0000-00000000000b'''
 \set orgcity '''30000000-0000-0000-0000-00000000000c'''
 \set orgz '''30000000-0000-0000-0000-00000000000d'''
 \set orgw '''30000000-0000-0000-0000-00000000000e'''
+\set orgarch '''30000000-0000-0000-0000-00000000000f'''
+\set orgsusp '''30000000-0000-0000-0000-000000000010'''
+\set orgnull '''30000000-0000-0000-0000-000000000011'''
+\set orgprosp '''30000000-0000-0000-0000-000000000012'''
+\set orgco '''30000000-0000-0000-0000-000000000013'''
 \set app1 '''40000000-0000-0000-0000-000000000001'''
 \set app2 '''40000000-0000-0000-0000-000000000002'''
 \set app3 '''40000000-0000-0000-0000-000000000003'''
@@ -262,18 +284,26 @@ end $$;
 \set app17 '''40000000-0000-0000-0000-000000000017'''
 \set app18 '''40000000-0000-0000-0000-000000000018'''
 \set app19 '''40000000-0000-0000-0000-000000000019'''
+\set app20 '''40000000-0000-0000-0000-000000000020'''
+\set app21 '''40000000-0000-0000-0000-000000000021'''
+\set app22 '''40000000-0000-0000-0000-000000000022'''
+\set app23 '''40000000-0000-0000-0000-000000000023'''
+\set app24 '''40000000-0000-0000-0000-000000000024'''
+\set app25 '''40000000-0000-0000-0000-000000000025'''
+\set app26 '''40000000-0000-0000-0000-000000000026'''
+\set app27 '''40000000-0000-0000-0000-000000000027'''
 \set nope '''40000000-0000-0000-0000-0000000000ff'''
 
 insert into auth.users (id, email, email_confirmed_at)
 select u, 'user-' || right(u::text, 3) || '@example.com', now()
 from unnest(array[:adm, :adm2, :u1, :u2, :u3, :u4, :u5, :u6, :u7, :u8, :u9, :u10, :u11, :u13, :u14,
-                  :u15, :u16, :u17, :u18, :u19]::uuid[]) u;
+                  :u15, :u16, :u17, :u18, :u19, :u20, :u21, :u22, :u23, :u24, :u25, :u26, :u27]::uuid[]) u;
 insert into auth.users (id, email, email_confirmed_at) values (:u12, 'unconfirmed@example.com', null);
 
 insert into public.profiles (id, role, status)
 select u, 'fleet_owner', 'active'
 from unnest(array[:u1, :u2, :u3, :u7, :u8, :u9, :u10, :u11, :u12, :u13, :u14,
-                  :u15, :u16, :u17, :u18, :u19]::uuid[]) u
+                  :u15, :u16, :u17, :u18, :u19, :u20, :u21, :u22, :u23, :u24, :u25, :u26, :u27]::uuid[]) u
 on conflict (id) do update set role = excluded.role, status = excluded.status;
 insert into public.profiles (id, role, status) values
   (:adm, 'admin', 'active'), (:adm2, 'admin', 'suspended'),
@@ -285,10 +315,19 @@ insert into public.organizations (id, name, org_type, status) values
   (:orgy, 'Seven Freight', 'fleet', 'active'),
   (:orgcity, 'City of Example', 'city', 'active'),
   (:orgz, 'Other Fleet Inc', 'fleet', 'active'),
-  (:orgw, 'Seventeen Freight', 'fleet', 'active');
+  (:orgw, 'Seventeen Freight', 'fleet', 'active'),
+  (:orgarch, 'Twenty Freight', 'fleet', 'archived'),
+  (:orgsusp, 'Twentyone Freight', 'fleet', 'suspended'),
+  (:orgnull, 'Twentytwo Freight', 'fleet', null),
+  (:orgprosp, 'Twentythree Freight', 'fleet', 'prospect'),
+  (:orgco, 'Co.', 'fleet', 'active');
 update public.profiles set organization_id = :orgx where id in (:u3, :u7);
 update public.profiles set organization_id = :orgz where id = :u15;
 update public.profiles set organization_id = :orgw where id = :u17;
+update public.profiles set organization_id = :orgarch where id = :u20;
+update public.profiles set organization_id = :orgnull where id = :u22;
+update public.profiles set organization_id = :orgprosp where id = :u23;
+update public.profiles set organization_id = :orgco where id = :u24;
 
 insert into public.pilot_applications (id, user_id, company_name, fleet_size, truck_count, website, status, organization_id) values
   (:app1, :u1, '  One Freight  ', '140', 140, 'https://one.example', 'pending', null),
@@ -310,7 +349,15 @@ insert into public.pilot_applications (id, user_id, company_name, fleet_size, tr
   (:app16, :u16, 'Sixteen Freight', '12', 12, null, 'archived', null),
   (:app17, :u17, 'Seventeen Freight', '12', 12, null, 'approved', :orgw),
   (:app18, :u18, 'Eighteen Freight', '12', 12, null, 'pending', null),
-  (:app19, :u19, 'Nineteen Freight', '12', 12, null, 'active', null);
+  (:app19, :u19, 'Nineteen Freight', '12', 12, null, 'active', null),
+  (:app20, :u20, 'Twenty Freight', '12', 12, null, 'pending', null),
+  (:app21, :u21, 'Twentyone Freight', '12', 12, null, 'pending', :orgsusp),
+  (:app22, :u22, 'Twentytwo Freight', '12', 12, null, 'pending', null),
+  (:app23, :u23, 'Twentythree Freight Inc', '12', 12, null, 'pending', null),
+  (:app24, :u24, 'Inc', '12', 12, null, 'pending', null),
+  (:app25, :u25, 'Dup Freight LLC', '12', 12, null, 'pending', null),
+  (:app26, :u26, 'Dup Freight', '12', 12, null, 'pending', null),
+  (:app27, :u27, 'LLC', '12', 12, null, 'pending', null);
 
 -- ---------------------------------------------------------------------------
 -- Apply 027, twice.
@@ -349,7 +396,7 @@ rollback;
 begin;
 select pg_temp.fails_as(pg_temp.approve_sql(:nope), 'authenticated', :adm, 'P0002');
 rollback;
-select pg_temp.ok((select count(*) from public.organizations) = 5, 'no organization created by a refused call');
+select pg_temp.ok((select count(*) from public.organizations) = 10, 'no organization created by a refused call');
 
 -- ---------------------------------------------------------------------------
 -- An admin approves app1.
@@ -364,8 +411,9 @@ select pg_temp.ok((select r->>'application_status' = 'approved'
     and (r->>'organization_created')::boolean
     and r->>'organization_name' = 'One Freight'
     and (r->>'owner_id')::uuid = :u1
-    and (r->>'application_id')::uuid = :app1 from r1),
-  'the result names the new organization, its name and the applicant');
+    and (r->>'application_id')::uuid = :app1
+    and r->'same_name_organizations' = '[]'::jsonb from r1),
+  'the result names the new organization, its name and the applicant, and no other of the same name');
 select pg_temp.ok((select o.name = 'One Freight' and o.org_type = 'fleet' and o.status = 'active'
     and o.website = 'https://one.example' and o.created_by = :adm
   from public.organizations o where o.id = (select (r->>'organization_id')::uuid from r1)),
@@ -461,6 +509,50 @@ select pg_temp.refused(:app10a, :adm, '22023', 'a denied application');
 select pg_temp.refused(:app11, :adm, '22023', 'a denied application, the applicant''s only one');
 select pg_temp.refused(:app16, :adm, '22023', 'an archived application');
 rollback;
+
+-- The organization must be open (review 155-2), and a name that normalizes
+-- to nothing is no company (155-4). Each of these passes every other check.
+begin;
+select pg_temp.refused(:app20, :adm, '22023', 'the applicant''s organization is archived');
+select pg_temp.refused(:app21, :adm, '22023', 'the application''s own organization is suspended');
+select pg_temp.refused(:app22, :adm, '22023', 'the applicant''s organization has no status');
+select pg_temp.refused(:app24, :adm, '22023', 'a profile organization "Co." for a company "Inc", both of which normalize to nothing');
+rollback;
+-- Made active again on purpose, the archived organization is joined.
+update public.organizations set status = 'active' where id = :orgarch;
+create temp table r_app20 as select pg_temp.approve_as(:app20, :adm) as r;
+select pg_temp.ok((select (r->>'organization_id')::uuid = :orgarch and not (r->>'organization_created')::boolean
+    and r->'same_name_organizations' = '[]'::jsonb from r_app20)
+  and (select status = 'approved' and organization_id = :orgarch from public.pilot_applications where id = :app20),
+  'once its organization is active again, the application joins it');
+-- A prospect organization of the same company is joined and stays a prospect.
+create temp table r_app23 as select pg_temp.approve_as(:app23, :adm) as r;
+select pg_temp.ok((select (r->>'organization_id')::uuid = :orgprosp from r_app23)
+  and (select status = 'prospect' from public.organizations where id = :orgprosp)
+  and (select status = 'approved' and organization_id = :orgprosp from public.pilot_applications where id = :app23),
+  'a prospect organization of the same company is joined, and stays a prospect');
+
+-- Same-name organizations are reported, never joined (155-3).
+create temp table r_app25 as select pg_temp.approve_as(:app25, :adm) as r;
+create temp table r_app26 as select pg_temp.approve_as(:app26, :adm) as r;
+select pg_temp.ok((select (r->>'organization_created')::boolean and r->'same_name_organizations' = '[]'::jsonb
+  from r_app25),
+  'the first "Dup Freight" organization has no other of the same name');
+select pg_temp.ok((select (r26.r->>'organization_created')::boolean
+    and r26.r->>'organization_id' <> r25.r->>'organization_id'
+    and r26.r->'same_name_organizations' = jsonb_build_array(jsonb_build_object(
+      'id', r25.r->>'organization_id', 'name', 'Dup Freight LLC', 'org_type', 'fleet', 'status', 'active'))
+  from r_app25 r25, r_app26 r26)
+  and (select organization_id = (select (r->>'organization_id')::uuid from r_app26)
+       from public.profiles where id = :u26),
+  '"Dup Freight" gets an organization of its own, and the result names "Dup Freight LLC"');
+create temp table r_app27 as select pg_temp.approve_as(:app27, :adm) as r;
+select pg_temp.ok((select (r->>'organization_created')::boolean and r->'same_name_organizations' = '[]'::jsonb
+  from r_app27),
+  'a name that normalizes to nothing ("LLC") matches no other organization, not even "Co."');
+select pg_temp.ok((select r->'same_name_organizations' = '[]'::jsonb from r2)
+  and (select r->'same_name_organizations' = '[]'::jsonb from r_app3),
+  'a second call, and an organization joined rather than created, report none');
 
 select pg_temp.approve_as(:app10b, :adm);
 select pg_temp.ok((select status = 'approved' from public.pilot_applications where id = :app10b),

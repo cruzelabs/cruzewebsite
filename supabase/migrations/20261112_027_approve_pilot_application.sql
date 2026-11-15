@@ -19,6 +19,11 @@
 --      reviewed_at to now.
 -- It returns the organization's id and name and the applicant's user id,
 -- which are what staff pass to the portal's `npm run fleet:create` (REA #77).
+-- When it creates the organization it also returns the other organizations
+-- whose name is the same company (same_name_organizations: id, name,
+-- org_type, status), so staff can check for a duplicate before running
+-- fleet:create. It never joins a company by name alone, so it only reports
+-- them; linking one by hand is a decision for a person.
 --
 -- Safe to call twice: the application row is locked, so a second call waits
 -- for the first, then finds the organization already set and changes nothing
@@ -35,7 +40,11 @@
 --   * an applicant whose profile names a different organization than the
 --     application, or an organization whose name does not match the
 --     application's company, or one that is not a fleet. A person belongs to
---     one organization, so moving them is a decision for a person;
+--     one organization, so moving them is a decision for a person. A name
+--     that normalizes to nothing ("Co.", "Inc") matches no company;
+--   * an organization that is not active or prospect (suspended, archived,
+--     or with no status), whether the application or the profile names it.
+--     Someone makes it active again first, on purpose;
 --   * an application with no company name, which would name the organization;
 --   * when invite_requires_confirmed_email() is true (022's switch for the
 --     day "Confirm email" is turned on), an applicant whose email address was
@@ -71,7 +80,9 @@ declare
   v_org_id uuid;
   v_org_name text;
   v_org_type text;
+  v_org_status text;
   v_created boolean := false;
+  v_same_name jsonb := '[]'::jsonb;
   v_status text;
   v_confirmed_at timestamptz;
 begin
@@ -134,7 +145,7 @@ begin
   v_org_id := coalesce(v_app.organization_id, v_profile.organization_id);
 
   if v_org_id is not null then
-    select o.name, o.org_type into v_org_name, v_org_type
+    select o.name, o.org_type, o.status into v_org_name, v_org_type, v_org_status
     from public.organizations o
     where o.id = v_org_id;
     if v_org_type is distinct from 'fleet' then
@@ -142,11 +153,21 @@ begin
         v_org_id, coalesce(v_org_type, 'missing')
         using errcode = '22023';
     end if;
-    -- Only the profile named it: join it only when it is the same company.
+    -- Only the profile named it: join it only when it is the same company. A
+    -- name that normalizes to nothing ("Co.", "Inc") is no company, so it
+    -- matches nothing, not even another such name.
     if v_app.organization_id is null
-       and public.normalize_company_name(v_org_name) <> public.normalize_company_name(v_app.company_name) then
+       and (public.normalize_company_name(v_org_name) = ''
+            or public.normalize_company_name(v_org_name) <> public.normalize_company_name(v_app.company_name)) then
       raise exception 'approve_pilot_application: the applicant already belongs to organization "%" (%), and this application is for "%". A person belongs to one organization, so link them by hand.',
         v_org_name, v_org_id, btrim(coalesce(v_app.company_name, ''))
+        using errcode = '22023';
+    end if;
+    -- A suspended or archived organization (or one with no status) is closed:
+    -- approving into it would open a portal for an account someone closed.
+    if v_org_status is null or v_org_status not in ('active', 'prospect') then
+      raise exception 'approve_pilot_application: organization "%" (%) is %. Make it active again first, or link the applicant to another organization by hand.',
+        v_org_name, v_org_id, coalesce(v_org_status, 'without a status')
         using errcode = '22023';
     end if;
   else
@@ -159,6 +180,19 @@ begin
     values (v_org_name, 'fleet', 'active', nullif(btrim(v_app.website), ''), v_caller)
     returning id into v_org_id;
     v_created := true;
+
+    -- Other organizations whose name is the same company ("Dup Freight" and
+    -- "Dup Freight LLC"), for staff to check before running fleet:create. A
+    -- name that normalizes to nothing matches none.
+    if public.normalize_company_name(v_org_name) <> '' then
+      select coalesce(jsonb_agg(jsonb_build_object('id', o.id, 'name', o.name, 'org_type', o.org_type,
+                                                   'status', o.status)
+                                order by o.created_at, o.id), '[]'::jsonb)
+        into v_same_name
+      from public.organizations o
+      where o.id <> v_org_id
+        and public.normalize_company_name(o.name) = public.normalize_company_name(v_org_name);
+    end if;
   end if;
 
   if v_profile.organization_id is null then
@@ -196,7 +230,8 @@ begin
     'organization_id', v_org_id,
     'organization_name', v_org_name,
     'organization_created', v_created,
-    'owner_id', v_app.user_id
+    'owner_id', v_app.user_id,
+    'same_name_organizations', v_same_name
   );
 end;
 $$;

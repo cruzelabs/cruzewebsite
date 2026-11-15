@@ -7,7 +7,12 @@
 //   - Save on an application already set to approved without an
 //     organization runs the same approval, never a bare status update
 //   - a refused approval shows the reason and no portal step, and puts back
-//     a message it had saved first
+//     a message it had saved first: what the row held just before that save
+//     (re-read then, so another admin's edit made while the dialog was open
+//     comes back, not the dialog's stale copy), and only into a field the row
+//     still holds as saved (review 155-5)
+//   - an approval that created an organization names the other organizations
+//     with the same company name above the portal step (review 155-3)
 //   - a denied application offers no Approve; Save on a later stage with no
 //     organization approves it and keeps the stage
 //   - bulk onboarding skips applications without an organization
@@ -26,9 +31,13 @@ const sb = vi.hoisted(() => {
   const from = (table: string) => {
     const builder: Record<string, unknown> = {};
     let last: { ids?: unknown } | null = null;
-    for (const m of ["select", "order", "limit", "eq", "maybeSingle"]) {
+    for (const m of ["order", "limit", "eq", "maybeSingle"]) {
       builder[m] = () => builder;
     }
+    builder.select = (columns: unknown) => {
+      events.push({ kind: "select", table, payload: columns });
+      return builder;
+    };
     builder.in = (_col: string, ids: unknown) => {
       if (last) last.ids = ids;
       return builder;
@@ -129,22 +138,35 @@ async function openDialog(row: Record<string, unknown>) {
   );
   fireEvent.click(await screen.findByRole("button", { name: String(row.company_name) }));
   await screen.findByText("Lifecycle stage");
+  // From here on, only what the test's own clicks do.
+  sb.events.length = 0;
 }
+
+// The dialog's read of the row's notes and message, and a row it returns.
+const READ = { kind: "select", table: "pilot_applications", payload: "notes, fleet_visible_message" };
+const rowNow = (notes: string | null, fleet_visible_message: string | null): Result => ({
+  data: { notes, fleet_visible_message },
+  error: null,
+});
+const OK: Result = { data: null, error: null };
+const REFUSED: Result = { data: null, error: { code: "22023", message: "approve_pilot_application: no" } };
 
 describe("PilotsTab approval", () => {
   it("saves the message first, then approves, then shows the fleet:create command", async () => {
     await openDialog(app());
-    sb.queues.pilot_applications.push({ data: null, error: null });
+    sb.queues.pilot_applications.push(rowNow(null, null), OK);
     sb.rpcResults.push({ data: approval(), error: null });
 
     fireEvent.change(screen.getByPlaceholderText(/Kickoff call link/), { target: { value: "Welcome aboard." } });
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
     expect((await screen.findByTestId("fleet-create-command")).textContent).toBe(COMMAND);
-    expect(sb.events.map((e) => e.kind)).toEqual(["update", "rpc"]);
-    expect(sb.events[0].payload).toEqual({ notes: "", fleet_visible_message: "Welcome aboard." });
-    expect(sb.events[1].payload).toEqual({ fn: "approve_pilot_application", args: { application_id: APP } });
+    expect(sb.events.map((e) => e.kind)).toEqual(["select", "update", "rpc"]);
+    expect(sb.events[0]).toEqual(READ);
+    expect(sb.events[1].payload).toEqual({ notes: "", fleet_visible_message: "Welcome aboard." });
+    expect(sb.events[2].payload).toEqual({ fn: "approve_pilot_application", args: { application_id: APP } });
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(screen.queryByTestId("same-name-organizations")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /copy command/i }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(COMMAND));
@@ -168,14 +190,93 @@ describe("PilotsTab approval", () => {
 
   it("puts a pre-saved message back when the approval is refused", async () => {
     await openDialog(app({ fleet_visible_message: "Old note", notes: "kept" }));
-    sb.queues.pilot_applications.push({ data: null, error: null }, { data: null, error: null });
-    sb.rpcResults.push({ data: null, error: { code: "22023", message: "approve_pilot_application: no" } });
+    sb.queues.pilot_applications.push(rowNow("kept", "Old note"), OK, rowNow("kept", "You're approved!"), OK);
+    sb.rpcResults.push(REFUSED);
     fireEvent.change(screen.getByPlaceholderText(/Kickoff call link/), { target: { value: "You're approved!" } });
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
-    await waitFor(() => expect(sb.events.map((e) => e.kind)).toEqual(["update", "rpc", "update"]));
-    expect(sb.events[0].payload).toEqual({ notes: "kept", fleet_visible_message: "You're approved!" });
-    expect(sb.events[2].payload).toEqual({ notes: "kept", fleet_visible_message: "Old note" });
+    await waitFor(() => expect(sb.events.map((e) => e.kind)).toEqual(["select", "update", "rpc", "select", "update"]));
+    expect(sb.events[1].payload).toEqual({ notes: "kept", fleet_visible_message: "You're approved!" });
+    expect(sb.events[3]).toEqual(READ);
+    // Only the field the save changed goes back.
+    expect(sb.events[4].payload).toEqual({ fleet_visible_message: "Old note" });
+    expect(toastMock.error).toHaveBeenCalledWith(
+      "Not approved: approve_pilot_application: no Notes and message were not saved; your text is still here."
+    );
     expect(screen.queryByTestId("fleet-create-command")).toBeNull();
+    expect(screen.getByDisplayValue("You're approved!")).toBeTruthy();
+  });
+
+  it("puts back what the row held just before the save, not the copy from when the dialog opened", async () => {
+    // The dialog opened on "Old note"; another admin then wrote "Their note".
+    await openDialog(app({ fleet_visible_message: "Old note", notes: "kept" }));
+    sb.queues.pilot_applications.push(rowNow("kept", "Their note"), OK, rowNow("kept", "You're approved!"), OK);
+    sb.rpcResults.push(REFUSED);
+    fireEvent.change(screen.getByPlaceholderText(/Kickoff call link/), { target: { value: "You're approved!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(sb.events.map((e) => e.kind)).toEqual(["select", "update", "rpc", "select", "update"]));
+    expect(sb.events[0]).toEqual(READ);
+    expect(sb.events[4].payload).toEqual({ fleet_visible_message: "Their note" });
+  });
+
+  it("leaves a field someone else changed after the save, and still puts back the other", async () => {
+    await openDialog(app({ fleet_visible_message: "Old note", notes: "kept" }));
+    // Both fields saved; then someone else rewrote the message before the refusal.
+    sb.queues.pilot_applications.push(rowNow("kept", "Old note"), OK, rowNow("new notes", "Changed meanwhile"), OK);
+    sb.rpcResults.push(REFUSED);
+    fireEvent.change(screen.getByPlaceholderText(/Kickoff call link/), { target: { value: "You're approved!" } });
+    fireEvent.change(screen.getByPlaceholderText(/Disposition/), { target: { value: "new notes" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(sb.events.map((e) => e.kind)).toEqual(["select", "update", "rpc", "select", "update"]));
+    expect(sb.events[1].payload).toEqual({ notes: "new notes", fleet_visible_message: "You're approved!" });
+    expect(sb.events[4].payload).toEqual({ notes: "kept" });
+    expect(toastMock.error).toHaveBeenCalledWith(
+      "Not approved: approve_pilot_application: no Notes and message were not saved. " +
+        "Someone else changed the message meanwhile, so their text was kept; yours is still here."
+    );
+  });
+
+  it("writes nothing back when someone else changed every field it saved", async () => {
+    await openDialog(app({ fleet_visible_message: "Old note", notes: "kept" }));
+    sb.queues.pilot_applications.push(rowNow("kept", "Old note"), OK, rowNow("kept", "Changed meanwhile"));
+    sb.rpcResults.push(REFUSED);
+    fireEvent.change(screen.getByPlaceholderText(/Kickoff call link/), { target: { value: "You're approved!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalled());
+    expect(sb.events.map((e) => e.kind)).toEqual(["select", "update", "rpc", "select"]);
+  });
+
+  it("saves nothing and does not approve when the row cannot be read first", async () => {
+    await openDialog(app({ fleet_visible_message: "Old note" }));
+    sb.queues.pilot_applications.push({ data: null, error: { message: "network down" } });
+    fireEvent.change(screen.getByPlaceholderText(/Kickoff call link/), { target: { value: "You're approved!" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith(
+        "Not approved: the application could not be read. Nothing was saved; try again."
+      )
+    );
+    expect(sb.events.map((e) => e.kind)).toEqual(["select"]);
+    expect(sb.rpc).not.toHaveBeenCalled();
+  });
+
+  it("names other organizations of the same company above the portal step", async () => {
+    const DUP = "30000000-0000-0000-0000-00000000000b";
+    await openDialog(app({ company_name: "Dup Freight" }));
+    sb.rpcResults.push({
+      data: approval({
+        organization_name: "Dup Freight",
+        same_name_organizations: [{ id: DUP, name: "Dup Freight LLC", org_type: "fleet", status: "active" }],
+      }),
+      error: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    const warning = await screen.findByTestId("same-name-organizations");
+    expect(warning.textContent).toContain(`Dup Freight LLC (fleet, active): ${DUP}`);
+    expect(warning.textContent).toContain("link the applicant to it by hand before you run the command below");
+    expect(screen.getByTestId("fleet-create-command")).toBeTruthy();
+    expect(toastMock.success).toHaveBeenCalledWith(
+      "Approved. The fleet's organization is created. Another organization has the same name: check it before the portal step."
+    );
   });
 
   it("offers no Approve on a denied application", async () => {
@@ -204,9 +305,10 @@ describe("PilotsTab approval", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Select Beta Freight" }));
     fireEvent.click(screen.getByRole("button", { name: "→ onboarding" }));
     fireEvent.click(await screen.findByRole("button", { name: "Apply" }));
-    await waitFor(() => expect(sb.events.length).toBe(1));
-    expect(sb.events[0].ids).toEqual([other.id]);
-    expect((sb.events[0].payload as { status: string }).status).toBe("onboarding");
+    const updates = () => sb.events.filter((e) => e.kind === "update");
+    await waitFor(() => expect(updates().length).toBe(1));
+    expect(updates()[0].ids).toEqual([other.id]);
+    expect((updates()[0].payload as { status: string }).status).toBe("onboarding");
   });
 
   it("shows why an approval was refused, and no portal step", async () => {

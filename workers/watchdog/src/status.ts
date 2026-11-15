@@ -27,11 +27,13 @@ export const COMPONENTS: readonly { id: ComponentId; name: string }[] = [
 export type PageId = Exclude<ComponentId, "api">;
 
 /** Pages probed only for this status page. `login`: the host sits behind
- *  Vercel Authentication on purpose, so a redirect to the Vercel login is up. */
+ *  Vercel Authentication on purpose, so a redirect to the Vercel login is up.
+ *  The Client Portal and Driver Web App are public since 2026-11-12 behind
+ *  their own sign-in, so their check is that sign-in page answering 2xx. */
 export const PAGE_CHECKS: Record<PageId, { url: string; login: boolean }> = {
   website: { url: "https://cruzemaps.com/", login: false },
-  client: { url: "https://client.cruzemaps.com/", login: true },
-  driver: { url: "https://driver.cruzemaps.com/", login: true },
+  client: { url: "https://client.cruzemaps.com/sign-in", login: false },
+  driver: { url: "https://driver.cruzemaps.com/sign-in", login: false },
   admin: { url: "https://admin.cruzemaps.com/", login: true },
 };
 

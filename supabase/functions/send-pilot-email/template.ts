@@ -23,15 +23,43 @@ const BRAND = {
 
 const LOGO_URL = "https://cruzemaps.com/logo.png";
 const SITE = "https://cruzemaps.com";
+// The Client Portal, where an approved fleet runs its pilot. The link text is
+// the full URL so the plain-text email keeps it when the tags are stripped.
+export const CLIENT_PORTAL_URL = "https://client.cruzemaps.com";
+const PORTAL_LINK = `<a href="${CLIENT_PORTAL_URL}" style="color:${BRAND.orange};">${CLIENT_PORTAL_URL}</a>`;
 
-const STATUS_COPY: Record<
-  string,
-  { subject: string; headline: string; body: string; accent: string; accentBar: string }
-> = {
+// `body` must be true of every application and every recipient, so it never
+// names an LOI and never assumes the recipient applied. A variant is used in
+// its place only when the caller has checked:
+//   - `bodyWithLoi` when a signed LOI is on file for the application
+//     (handler.ts, hasSignedLoi). /apply signs the LOI in a second request
+//     after the pilot row is in, and a pilot row can be inserted with no LOI
+//     at all, so an email sent off the pilot row cannot take the LOI for
+//     granted.
+//   - `bodyToAccount` when the email goes to the email address of the account
+//     that applied (handler.ts, isAccountEmail). The email goes to the row's
+//     contact_email, the Work email on /apply, which the applicant can change
+//     to a colleague's address.
+// No status has both.
+interface StatusCopy {
+  subject: string;
+  headline: string;
+  body: string;
+  bodyWithLoi?: string;
+  bodyToAccount?: string;
+  accent: string;
+  accentBar: string;
+}
+
+const bodyFor = (copy: StatusCopy, vars: { loiSigned?: boolean; toAccountEmail?: boolean }) =>
+  (vars.loiSigned === true && copy.bodyWithLoi) || (vars.toAccountEmail === true && copy.bodyToAccount) || copy.body;
+
+const STATUS_COPY: Record<string, StatusCopy> = {
   pending: {
     subject: "We received your Cruze pilot application",
     headline: "Application received",
-    body: "Thanks for applying. Our team will review your fleet profile and signed LOI within two business days. You can track status anytime on your fleet dashboard.",
+    body: "Thanks for applying. Our team will review your application within two business days. You can track status anytime on your fleet dashboard.",
+    bodyWithLoi: "Thanks for applying. Our team will review your application and signed LOI within two business days. You can track status anytime on your fleet dashboard.",
     accent: BRAND.orange,
     accentBar: BRAND.orangeBright,
   },
@@ -45,7 +73,10 @@ const STATUS_COPY: Record<
   approved: {
     subject: "Your Cruze pilot application was approved",
     headline: "You're approved for the pilot",
-    body: "Welcome aboard. Check your fleet dashboard for kickoff details and next steps from our team.",
+    // Names no email address: the account's address is not on the
+    // application row, and the recipient may not know it.
+    body: `Welcome aboard. Next, our team sets up your fleet's portal at ${PORTAL_LINK}, where you will sign in with the account that applied for the pilot. If that account is not yours, ask the person who applied to invite you. Check your fleet dashboard for kickoff details and next steps from our team.`,
+    bodyToAccount: `Welcome aboard. Next, our team sets up your fleet's portal at ${PORTAL_LINK}, where you will sign in with the account you used to apply. Check your fleet dashboard for kickoff details and next steps from our team.`,
     accent: BRAND.orange,
     accentBar: BRAND.orangeBright,
   },
@@ -59,7 +90,8 @@ const STATUS_COPY: Record<
   active: {
     subject: "Your Cruze pilot is now active",
     headline: "Pilot is live",
-    body: "Your fleet is active on Cruze coordination. Open your fleet dashboard to view pilot status and your signed LOI.",
+    body: "Your fleet is active on Cruze coordination. Open your fleet dashboard to view pilot status.",
+    bodyWithLoi: "Your fleet is active on Cruze coordination. Open your fleet dashboard to view pilot status and your signed LOI.",
     accent: BRAND.cyan,
     accentBar: BRAND.cyanBright,
   },
@@ -79,11 +111,24 @@ const STATUS_COPY: Record<
   },
 };
 
+// Whether the email for `status` has copy that names a signed LOI, so the
+// caller looks one up only when the answer changes the email. The
+// confirmation is the email for "pending".
+export const namesSignedLoi = (status: string): boolean => Boolean(STATUS_COPY[status]?.bodyWithLoi);
+
+// Whether the email for `status` has copy that tells the reader they applied
+// ("the account you used to apply"), so the caller compares the recipient
+// with the account's email only when the answer changes the email.
+export const namesSignInAccount = (status: string): boolean => Boolean(STATUS_COPY[status]?.bodyToAccount);
+
 export function renderPilotSubmittedEmail(vars: {
   email: string;
   companyName: string;
   dashboardUrl: string;
   loiUrl?: string;
+  // True only when a signed LOI for this application is on file right now.
+  // Left out or false, the email does not mention an LOI.
+  loiSigned?: boolean;
 }): { subject: string; html: string; text: string } {
   const copy = STATUS_COPY.pending;
   const ctaLabel = "View fleet dashboard";
@@ -99,12 +144,13 @@ export function renderPilotSubmittedEmail(vars: {
     preheader: `Application received for ${vars.companyName}.`,
     eyebrow: "Pilot application",
     headline: copy.headline,
-    body: `${copy.body}${vars.companyName ? ` (${escapeHtml(vars.companyName)})` : ""}`,
+    body: `${bodyFor(copy, { loiSigned: vars.loiSigned })}${vars.companyName ? ` (${escapeHtml(vars.companyName)})` : ""}`,
     ctaUrl: vars.dashboardUrl,
     ctaLabel,
     accent: copy.accent,
     accentBar: copy.accentBar,
     extraHtml: extra,
+    extraText: vars.loiUrl ? `Download your signed LOI: ${vars.loiUrl}` : "",
   });
 }
 
@@ -114,8 +160,15 @@ export function renderPilotStatusEmail(vars: {
   status: string;
   dashboardUrl: string;
   fleetMessage?: string | null;
+  // As in renderPilotSubmittedEmail.
+  loiSigned?: boolean;
+  // True only when `email` is the email address of the account that applied.
+  // Left out or false, the approval email does not say the reader applied:
+  // it says to sign in with the account that applied, or to ask the person
+  // who applied for an invite.
+  toAccountEmail?: boolean;
 }): { subject: string; html: string; text: string } {
-  const copy = STATUS_COPY[vars.status] ?? {
+  const copy: StatusCopy = STATUS_COPY[vars.status] ?? {
     subject: "Update on your Cruze pilot application",
     headline: "Status update",
     body: "Your application status has been updated. Sign in to your fleet dashboard for details.",
@@ -138,12 +191,14 @@ export function renderPilotStatusEmail(vars: {
     preheader: copy.headline,
     eyebrow: "Pilot application",
     headline: copy.headline,
-    body: copy.body,
+    body: bodyFor(copy, { loiSigned: vars.loiSigned, toAccountEmail: vars.toAccountEmail }),
     ctaUrl: vars.dashboardUrl,
     ctaLabel: "Open fleet dashboard",
     accent: copy.accent,
     accentBar: copy.accentBar,
     extraHtml: messageBlock,
+    // The plain-text email carries the staff message too, word for word.
+    extraText: vars.fleetMessage ? `Message from Cruze:\n${vars.fleetMessage}` : "",
   });
 }
 
@@ -159,6 +214,9 @@ function wrapEmail(opts: {
   accent: string;
   accentBar: string;
   extraHtml?: string;
+  // The plain-text form of extraHtml. Set both or neither, so a reader of the
+  // plain-text email misses nothing the HTML shows.
+  extraText?: string;
 }): { subject: string; html: string; text: string } {
   const html = `<!DOCTYPE html>
 <html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -190,6 +248,7 @@ Or: <a href="${escapeAttr(opts.ctaUrl)}" style="color:${opts.accent};">${escapeH
     "",
     opts.body.replace(/<[^>]+>/g, ""),
     "",
+    ...(opts.extraText ? [opts.extraText, ""] : []),
     `${opts.ctaLabel}: ${opts.ctaUrl}`,
     "",
     "— Cruzemaps",

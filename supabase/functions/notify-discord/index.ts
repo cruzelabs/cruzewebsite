@@ -1,5 +1,5 @@
-// Supabase Edge Function: posts a Discord embed when a pilot application, LOI
-// signature or contact message row is inserted.
+// Supabase Edge Function: posts a notice to Discord, Slack or both when a pilot
+// application, LOI signature or contact message row is inserted.
 //
 // Called by three database webhook triggers (no auth header, so deploy with
 // --no-verify-jwt):
@@ -16,6 +16,9 @@
 //   - DISCORD_WEBHOOK_PILOTS    (optional; pilot_applications)
 //   - DISCORD_WEBHOOK_LOIS      (optional; loi_signatures)
 //   - DISCORD_WEBHOOK_CONTACT   (optional; contact_messages)
+//   - SLACK_WEBHOOK_URL         (optional; a Slack incoming webhook, every event)
+//   Set the Slack secret, the Discord ones, or both. With none set the
+//   function posts nothing.
 //   - SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY are injected by Supabase.
 //
 // Needs public.discord_notifications_sent from migration 020; apply it first.
@@ -63,7 +66,7 @@ serve((req) =>
       return error ? null : count ?? 0;
     },
 
-    async postDiscord(webhookUrl, body) {
+    async postWebhook(webhookUrl, body) {
       const res = await fetch(webhookUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

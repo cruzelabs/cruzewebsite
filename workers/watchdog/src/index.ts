@@ -1,15 +1,16 @@
 // Cloudflare Worker: account-wide watchdog for the Cruze Workers.
 //
 // Crons (see wrangler.jsonc):
-//   */5 * * * *  — posts to Discord when any Worker threw, hit the CPU limit,
+//   */5 * * * *  — posts to Slack and Discord when any Worker threw, hit the CPU limit,
 //                  or otherwise failed in the last check window. Also probes
 //                  api.cruzemaps.com (/health, /readyz) and posts when a
 //                  target goes down or recovers; state machine in apiProbe.ts,
 //                  state kept in the WATCHDOG_STATE KV namespace. Then checks
 //                  the public pages and updates the status page's record
 //                  (status.ts), in the same namespace.
-//   0 14 * * *   — daily digest: yesterday's requests vs the free-plan cap,
-//                  failures per Worker. Doubles as a heartbeat: if the digest
+//   0 14 * * *   — daily digest: yesterday's requests vs a day's share of
+//                  the Workers Paid monthly allowance, failures per
+//                  Worker. Doubles as a heartbeat: if the digest
 //                  stops arriving, the watchdog itself is broken.
 //
 // One public route, status.cruzemaps.com: GET / (HTML) and /status.json, read
@@ -37,11 +38,14 @@ import {
   type PageId,
   type StatusRecord,
 } from "./status";
+import { slackText } from "./slack";
 
 interface Env {
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
-  DISCORD_WEBHOOK_URL: string;
+  // Alerts go to every chat webhook that is set. At least one must be.
+  DISCORD_WEBHOOK_URL?: string;
+  SLACK_WEBHOOK_URL?: string;
   WATCHDOG_STATE: KVNamespace;
 }
 
@@ -51,8 +55,12 @@ interface Row {
   dimensions: { scriptName: string; status: string };
 }
 
-// Workers free plan: 100k requests/day across the account.
-const FREE_DAILY_REQUESTS = 100_000;
+// Workers Paid (the account's plan since 2026-11-11) includes 10 million
+// requests a month across the account and has no daily cap. The digest
+// compares a day against an even daily share of that allowance, so a day that
+// would use up the month if repeated stands out.
+const PAID_MONTHLY_REQUESTS = 10_000_000;
+const DAILY_SHARE_REQUESTS = Math.floor(PAID_MONTHLY_REQUESTS / 31);
 
 // Analytics lag a couple of minutes, so each 5-min run checks the window that
 // closed 5 minutes ago. Windows tile exactly: every invocation is seen once.
@@ -98,8 +106,8 @@ export default {
   },
 
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    if (!env.DISCORD_WEBHOOK_URL) {
-      console.warn("watchdog idle: DISCORD_WEBHOOK_URL not set");
+    if (!env.DISCORD_WEBHOOK_URL && !env.SLACK_WEBHOOK_URL) {
+      console.warn("watchdog idle: neither SLACK_WEBHOOK_URL nor DISCORD_WEBHOOK_URL is set");
       return;
     }
     if (controller.cron === "0 14 * * *") {
@@ -145,7 +153,7 @@ async function probeTarget(env: Env, target: string, now: number): Promise<Targe
   );
   // KV writes are capped per day on the free plan; only persist a change.
   if (next !== prev) await env.WATCHDOG_STATE.put(key, JSON.stringify(next));
-  if (alert) await discord(env, message(alert, target, prev, next, now));
+  if (alert) await notify(env, message(alert, target, prev, next, now));
   return next;
 }
 
@@ -222,7 +230,7 @@ async function errorCheck(env: Env, now: number): Promise<void> {
         `- **${r.dimensions.scriptName}** ${label(r.dimensions.status)}: ` +
         `${r.sum.requests}x (median CPU ${ms(r.quantiles.cpuTimeP50)})`,
     );
-  await discord(
+  await notify(
     env,
     `:rotating_light: **Worker failures** ${clock(start)}-${clock(end)} UTC\n` +
       lines.join("\n") +
@@ -249,7 +257,7 @@ async function dailyDigest(env: Env, now: number): Promise<void> {
   }
 
   const total = [...byScript.values()].reduce((n, s) => n + s.total, 0);
-  const pct = (total / FREE_DAILY_REQUESTS) * 100;
+  const pct = (total / DAILY_SHARE_REQUESTS) * 100;
   const anyFailures = [...byScript.values()].some((s) => s.failed > 0);
   const icon = pct >= 80 || anyFailures ? ":warning:" : ":white_check_mark:";
 
@@ -260,10 +268,10 @@ async function dailyDigest(env: Env, now: number): Promise<void> {
         `- **${name}**: ${s.total} requests, ${s.failed} failed` +
         (s.cpuLimit ? ` (${s.cpuLimit} CPU-limit)` : ""),
     );
-  await discord(
+  await notify(
     env,
     `${icon} **Workers daily digest** for ${new Date(start).toISOString().slice(0, 10)}\n` +
-      `Requests: ${total.toLocaleString("en-US")} / ${FREE_DAILY_REQUESTS.toLocaleString("en-US")} free-plan cap (${pct.toFixed(1)}%)\n` +
+      `Requests: ${total.toLocaleString("en-US")} / ${DAILY_SHARE_REQUESTS.toLocaleString("en-US")} daily share of the 10M a month in Workers Paid (${pct.toFixed(1)}%)\n` +
       (lines.length ? lines.join("\n") : "- no invocations") +
       `\n${dashboardLink(env)}`,
   );
@@ -293,21 +301,43 @@ async function invocations(env: Env, start: number, end: number): Promise<Row[]>
     // Surface watchdog breakage (expired token, schema change) instead of
     // going silent.
     const reason = body.errors?.map((e) => e.message).join("; ") || `HTTP ${res.status}`;
-    await discord(env, `:x: **Watchdog** could not read Workers analytics: ${reason}`);
+    await notify(env, `:x: **Watchdog** could not read Workers analytics: ${reason}`);
     return [];
   }
   return body.data.viewer.accounts[0]?.workersInvocationsAdaptive ?? [];
 }
 
-async function discord(env: Env, content: string): Promise<void> {
-  // Discord caps message content at 2000 characters. No message from here
-  // may ping anyone, whatever text it carries.
-  const res = await fetch(env.DISCORD_WEBHOOK_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ content: content.slice(0, 2000), allowed_mentions: { parse: [] } }),
-  });
-  if (!res.ok) console.error(`discord webhook failed: HTTP ${res.status}`);
+// Posts one alert to every configured chat webhook: Slack (#alerts) and,
+// until it is retired, Discord. No message from here may ping anyone,
+// whatever text it carries. A failing webhook never stops the other one.
+async function notify(env: Env, content: string): Promise<void> {
+  const posts: Promise<void>[] = [];
+  if (env.SLACK_WEBHOOK_URL) {
+    posts.push(post("slack", env.SLACK_WEBHOOK_URL, { text: slackText(content) }));
+  }
+  if (env.DISCORD_WEBHOOK_URL) {
+    // Discord caps message content at 2000 characters.
+    posts.push(
+      post("discord", env.DISCORD_WEBHOOK_URL, {
+        content: content.slice(0, 2000),
+        allowed_mentions: { parse: [] },
+      }),
+    );
+  }
+  await Promise.all(posts);
+}
+
+async function post(name: string, url: string, body: unknown): Promise<void> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) console.error(`${name} webhook failed: HTTP ${res.status}`);
+  } catch (err) {
+    console.error(`${name} webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function label(status: string): string {

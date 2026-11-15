@@ -71,7 +71,7 @@ fi
 # Repo settings for the runner. Paths starting with ~ are expanded.
 CI_LOCAL_CONFIG_JSON="$(cat <<'JSON'
 {
-  "repo": "cruzemaps/cruzewebsite",
+  "repo": "cruzelabs/cruzewebsite",
   "base_branch": "main",
   "gitleaks_version": "8.24.3",
   "lhci_version": "0.13.0",

@@ -58,7 +58,8 @@ async function loadProgrammaticRoutes(SITE) {
   return [...cityRoutes, ...laneRoutes, ...insightRoutes];
 }
 
-async function loadModuleArray(relPath, exportName) {
+// Exported for scripts/route-manifest.mjs, which reads the same sources.
+export async function loadModuleArray(relPath, exportName) {
   const src = await readFile(join(ROOT, relPath), "utf8");
   const re = new RegExp(`export const ${exportName}: \\w+\\[\\] = (\\[[\\s\\S]*?\\n\\];)`);
   const m = src.match(re);
@@ -66,7 +67,7 @@ async function loadModuleArray(relPath, exportName) {
   return new Function(`return ${m[1].replace(/;\s*$/, "")}`)();
 }
 
-async function loadRoutes() {
+export async function loadRoutes() {
   const src = await readFile(join(ROOT, "src/lib/seo.ts"), "utf8");
   // Strip type-only syntax we don't need for evaluation. We extract SITE,
   // any module-level helper consts (orgJsonLd, softwareJsonLd, ...), and

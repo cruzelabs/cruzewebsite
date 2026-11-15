@@ -17,7 +17,7 @@ export const QUIET_MS = 30 * 60_000;
 export const TARGETS = [
   "https://api.cruzemaps.com/health",
   "https://api.cruzemaps.com/readyz",
-  // The client portal's background jobs (cruzemaps/REA infra/workers/jobs-tick):
+  // The client portal's background jobs (cruzelabs/REA infra/workers/jobs-tick):
   // 200 while a tick succeeded in the last 15 minutes, 503 otherwise.
   "https://cruze-jobs-tick.cruzemaps.workers.dev/health",
 ] as const;

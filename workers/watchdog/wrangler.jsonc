@@ -22,5 +22,6 @@
   "kv_namespaces": [{ "binding": "WATCHDOG_STATE", "id": "a6b86757310047428cc74a9a7eb649ca" }]
   // Secrets are delivered out-of-band, never committed:
   //   wrangler secret put CF_API_TOKEN         (Account > Account Analytics > Read)
-  //   wrangler secret put DISCORD_WEBHOOK_URL
+  //   wrangler secret put SLACK_WEBHOOK_URL     (an incoming webhook for #alerts)
+  //   wrangler secret put DISCORD_WEBHOOK_URL   (optional; drop it once Slack is confirmed)
 }

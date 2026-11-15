@@ -7,5 +7,16 @@
   "observability": { "enabled": true },
   "routes": [
     { "pattern": "og.cruzemaps.com", "custom_domain": true }
+  ],
+  // Native rate limiting on renders (src/handler.ts). A cached image never
+  // counts; only a render does. RL_PER_IP is keyed by CF-Connecting-IP and
+  // RL_GLOBAL caps all renders together. Both count per Cloudflare location.
+  // A render past either one gets a 429 with Retry-After: 60.
+  // namespace_id is any integer that is unique in the account (frame-analyze
+  // uses 2001 and 2002); period must be 10 or 60 seconds. src/handler.test.ts
+  // checks these names, the period and the unique ids.
+  "ratelimits": [
+    { "name": "RL_PER_IP", "namespace_id": "2003", "simple": { "limit": 10, "period": 60 } },
+    { "name": "RL_GLOBAL", "namespace_id": "2004", "simple": { "limit": 60, "period": 60 } }
   ]
 }

@@ -96,7 +96,7 @@ If the URL 502s, the worker route binding didn't apply. Check `wrangler.jsonc` i
 
 ## Step 5b — (Alternative to 4 + 5a) Manual upload via dashboard
 
-Use this only if you can't run `wrangler` from a terminal.
+Use this only if you can't run `wrangler` from a terminal. A Worker made this way has no rate limits (the `ratelimits` in `workers/og-image/wrangler.jsonc`), so it is only good for the placeholder below. Deploy the real worker with wrangler.
 
 1. Navigate to: `https://dash.cloudflare.com/<ACCOUNT_ID>/workers-and-pages`
 2. Click **Create application** → **Create Worker**.

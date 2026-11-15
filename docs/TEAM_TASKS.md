@@ -24,8 +24,8 @@ The page exists and shows download cards. The download links currently return 40
    - Match brand colors
 
 4. **Product screenshots** (`cruze-product-screens.zip`)
-   - Mission Control dashboard at 2880×1800
-   - Fleet Dashboard at 2880×1800
+   - The current zip has the homepage, route planner, For Fleets and For Cities pages.
+   - No Mission Control or Fleet Dashboard shots until they show real pilot data. Mission Control has no data source yet and shows no figures.
    - Consumer driving experience (mobile mockup)
    - Save as PNGs, compressed but lossless
 

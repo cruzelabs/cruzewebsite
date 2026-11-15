@@ -42,7 +42,7 @@ export default function Press() {
           <DownloadCard
             icon={<ImageIcon size={20} />}
             title="Product screenshots"
-            description="High-resolution screenshots of Mission Control, Fleet Dashboard, and the consumer driver experience."
+            description="High-resolution screenshots of the homepage, the route planner, and the For Fleets and For Cities pages."
             href="/press/cruze-product-screens.zip"
           />
         </div>

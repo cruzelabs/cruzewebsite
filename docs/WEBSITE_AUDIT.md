@@ -82,6 +82,7 @@ Use this as a comeback checklist. Pilot apply/LOI work (migration `014`, `send-p
 
 - **File:** `src/components/dashboard/LiveFlowTab.tsx` — hardcoded map nodes + scripted logs
 - **Fix:** Banner: “Illustrative demo data” unless wired to real telemetry.
+- **Status:** Fixed (readiness E5, 2026-11-15). Mission Control shows "No live data yet" and no figures. The three mock tabs (LiveFlowTab, MarginalGainsTab, FleetHealthTab) were deleted.
 
 ### 11. Fleet “active” pilot — no real metrics UI
 

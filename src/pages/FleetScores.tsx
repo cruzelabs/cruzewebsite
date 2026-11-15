@@ -271,6 +271,32 @@ function ConnectPanel({
   );
 }
 
+// Shown when this build has no fleet backend (VITE_CRUZE_API_URL unset, as on
+// cruzemaps.com today). There are no scores to show, so the page says so, with
+// no login form for a backend that is not there and no config names.
+function UnavailablePanel() {
+  return (
+    <div className="mx-auto mt-6 max-w-md rounded-2xl border border-white/10 bg-white/[0.03] p-8 text-center">
+      <Gauge className="mx-auto h-8 w-8 text-white/40" aria-hidden="true" />
+      <h1 className="mt-4 font-display text-2xl font-semibold text-white">
+        Driver scores are not available yet
+      </h1>
+      <p className="mt-2 text-sm leading-relaxed text-white/60">
+        Driver scores come from the Cruze fleet backend, and this site is not connected to it yet.
+        There are no scores to show, so this page shows none.
+      </p>
+      <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
+        <Button asChild className="bg-brand-orange text-white hover:bg-brand-orange/90">
+          <Link to="/fleet-dashboard">Back to pilot status</Link>
+        </Button>
+        <Button asChild variant="ghost" className="text-white/70 hover:bg-white/5 hover:text-white">
+          <a href="mailto:hello@cruzemaps.com?subject=Driver%20scores">Email Cruze</a>
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 const FleetScores = () => {
   // Bridge the website's Supabase session to a backend token via the SSO exchange.
   // The hook uses this access token to mint a backend session transparently; if the
@@ -369,6 +395,14 @@ const FleetScores = () => {
       </button>
     </th>
   );
+
+  if (status === "unavailable") {
+    return (
+      <Shell>
+        <UnavailablePanel />
+      </Shell>
+    );
+  }
 
   if (status === "exchanging") {
     return (

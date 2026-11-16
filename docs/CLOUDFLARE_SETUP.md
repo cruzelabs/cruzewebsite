@@ -60,7 +60,7 @@ To use a different subdomain, edit `workers/og-image/wrangler.jsonc#routes`.
 
 A render costs about 90 ms of CPU, so renders are rate limited. `wrangler.jsonc` binds two native rate limiters (`ratelimits`):
 
-- `RL_PER_IP`: 10 renders a minute per client IP (`CF-Connecting-IP`).
+- `RL_PER_IP`: 10 renders a minute per client IP (`CF-Connecting-IP`). An IPv6 address counts by its /64, because a home or a phone usually gets a whole /64 and could use a new address for every request.
 - `RL_GLOBAL`: 60 renders a minute in total. It is asked only after the IP passes, so one IP cannot use it up.
 
 Cloudflare counts both per location. Past either one the worker answers 429 with `Retry-After: 60` and `cache-control: no-store`. A cached image never counts, so it is still served.

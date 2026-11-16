@@ -71,7 +71,7 @@ export CLOUDFLARE_API_TOKEN="paste-the-token-from-step-3"
 npx wrangler deploy
 ```
 
-Expected output ends with `Deployed cruze-og-image triggers (Xms)` and a `*.workers.dev` URL.
+Expected output ends with `Deployed cruze-og-image triggers (Xms)` and a `*.workers.dev` URL. Before that, its bindings list must show `env.RL_PER_IP (10 requests/60s)` and `env.RL_GLOBAL (60 requests/60s)`, both `Rate Limit`. Without them the worker serves cached images only and renders nothing. `npx wrangler deploy --dry-run` prints the same list without deploying.
 
 > If the extension is doing this and can't access a terminal: skip ahead to Step 5b (manual upload via dashboard).
 

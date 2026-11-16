@@ -12,10 +12,11 @@
 //      cached PNG instead of a new render.
 //   3. A cached PNG is served without asking the rate limiters, so a crawler
 //      never gets a 429 for an image that is already rendered.
-//   4. A render needs the per-IP limiter (keyed by CF-Connecting-IP) and then
-//      the global one to agree, or the answer is a 429. The global limiter is
-//      asked only after the IP passes, so one noisy IP cannot spend the budget
-//      of everyone else. Cloudflare counts both per location, not worldwide.
+//   4. A render needs the per-IP limiter (keyed by CF-Connecting-IP, an IPv6
+//      address by its /64, see clientKey) and then the global one to agree, or
+//      the answer is a 429. The global limiter is asked only after the IP
+//      passes, so one noisy IP cannot spend the budget of everyone else.
+//      Cloudflare counts both per location, not worldwide.
 
 /** The native Cloudflare rate-limit binding (`ratelimits` in wrangler.jsonc). */
 export interface RateLimit {
@@ -172,6 +173,28 @@ export function cardHtml(card: Card): string {
     `.replace(/>\s+</g, "><"); // whitespace between tags becomes stray flex items
 }
 
+/**
+ * The per-IP limiter's key for a client address. An IPv4 address is its own
+ * key. An IPv6 address is keyed by its /64, because a home or a phone usually
+ * gets a whole /64 and can use a new address from it for every request. Any
+ * spelling of the same /64 gets the same key. Text that is not an IPv6
+ * address is used as it is, and no address at all is "unknown".
+ */
+export function clientKey(ip: string | null): string {
+  if (!ip) return "unknown";
+  if (!ip.includes(":")) return ip;
+  const halves = ip.toLowerCase().split("::");
+  if (halves.length > 2) return ip;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves[1] ? halves[1].split(":") : [];
+  // "::" stands for one or more groups of zeros; without it there are eight groups.
+  const zeros = 8 - head.length - tail.length;
+  if (halves.length === 2 ? zeros < 1 : zeros !== 0) return ip;
+  const groups = [...head, ...new Array<string>(zeros).fill("0"), ...tail];
+  if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return ip;
+  return `${groups.slice(0, 4).map((group) => parseInt(group, 16).toString(16)).join(":")}::/64`;
+}
+
 function tooManyRequests(): Response {
   return new Response("Too many requests\n", {
     status: 429,
@@ -188,11 +211,11 @@ function tooManyRequests(): Response {
  * is missing, so a config mistake shows up as an exception (which the
  * watchdog reports) and never as renders with no limit.
  */
-async function mayRender(env: Env, ip: string): Promise<boolean> {
+async function mayRender(env: Env, ip: string | null): Promise<boolean> {
   if (!env.RL_PER_IP || !env.RL_GLOBAL) {
     throw new Error("og-image: the RL_PER_IP and RL_GLOBAL rate limit bindings are missing (see wrangler.jsonc)");
   }
-  if (!(await env.RL_PER_IP.limit({ key: ip })).success) return false;
+  if (!(await env.RL_PER_IP.limit({ key: clientKey(ip) })).success) return false;
   return (await env.RL_GLOBAL.limit({ key: "global" })).success;
 }
 
@@ -209,8 +232,7 @@ export async function handle(request: Request, env: Env, deps: Deps): Promise<Re
   const cached = await deps.cache.match(key);
   if (cached) return cached;
 
-  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-  if (!(await mayRender(env, ip))) return tooManyRequests();
+  if (!(await mayRender(env, request.headers.get("CF-Connecting-IP")))) return tooManyRequests();
 
   const png = await deps.render(cardHtml(card));
   // Buffered, so a failed render is a 500 here instead of a 200 with an empty

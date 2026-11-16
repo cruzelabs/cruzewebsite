@@ -18,6 +18,7 @@ import {
   cacheKey,
   cardHtml,
   cleanText,
+  clientKey,
   handle,
   parseCard,
   type Deps,
@@ -160,6 +161,14 @@ describe("rate limits", () => {
     expect(perIpLimiter.keys).toEqual(["unknown", "unknown"]);
   });
 
+  it("counts an IPv6 /64 as one client, so a new address per request does not get past the limit", async () => {
+    const { get, perIpLimiter } = setup({ perIp: 1 });
+    expect((await get("/?title=one", "2001:db8:aa:1::1")).status).toBe(200);
+    expect((await get("/?title=two", "2001:db8:aa:1:dead:beef:0:7")).status).toBe(429);
+    expect((await get("/?title=two", "2001:db8:aa:2::1")).status).toBe(200);
+    expect(perIpLimiter.keys).toEqual(["2001:db8:aa:1::/64", "2001:db8:aa:1::/64", "2001:db8:aa:2::/64"]);
+  });
+
   it("answers 429 when the global limit is spent, whatever the IP", async () => {
     const { get } = setup({ global: 1 });
     expect((await get("/?title=one", IP_A)).status).toBe(200);
@@ -189,6 +198,36 @@ describe("rate limits", () => {
     await expect(get("/?title=new", IP_A, {}, {})).rejects.toThrow(/RL_PER_IP and RL_GLOBAL/);
     expect(rendered).toHaveLength(1);
     expect((await get("/?title=cached", IP_A, {}, {})).status).toBe(200);
+  });
+});
+
+describe("clientKey", () => {
+  it("keys an IPv4 address by itself, and no address as unknown", () => {
+    expect(clientKey(IP_A)).toBe(IP_A);
+    expect(clientKey(null)).toBe("unknown");
+    expect(clientKey("")).toBe("unknown");
+  });
+
+  it("keys an IPv6 address by its /64, however it is written", () => {
+    const key = "2001:db8:0:12::/64";
+    for (const ip of [
+      "2001:db8:0:12::1",
+      "2001:0DB8:0000:0012:0000:0000:0000:0001",
+      "2001:db8::12:ffff:ffff:ffff:ffff",
+      "2001:db8:0:12:1:2:3:4",
+    ]) {
+      expect(clientKey(ip)).toBe(key);
+    }
+    expect(clientKey("2001:db8:0:13::1")).toBe("2001:db8:0:13::/64");
+    expect(clientKey("::1")).toBe("0:0:0:0::/64");
+    expect(clientKey("2001:db8::")).toBe("2001:db8:0:0::/64");
+  });
+
+  it("uses text that is not an IPv6 address as it is", () => {
+    const notIpv6 = ["1::2::3", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "1:2:3:4::5:6:7:8", "2001:db8::g", "::ffff:203.0.113.7"];
+    for (const ip of notIpv6) {
+      expect(clientKey(ip)).toBe(ip);
+    }
   });
 });
 

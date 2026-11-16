@@ -87,6 +87,7 @@ Use this as a comeback checklist. Pilot apply/LOI work (migration `014`, `send-p
 ### 11. Fleet “active” pilot — no real metrics UI
 
 - Fleet dashboard honest copy exists (“coming soon”); still no live metrics — align sales/demo language.
+- `/fleet-scores` (driver scores): production has no fleet backend, so the page says "Driver scores are not available yet" and shows no sign-in form (readiness E5, 2026-11-15).
 
 ### 12. Demo login and impersonation are dev-only (T16, Oct 2026)
 
@@ -212,7 +213,7 @@ After adding routes, extend `prerender.mjs` / `seo.ts` for dynamic slugs from `c
 | **P1** | City signup copy / invite-only flow | Small–medium |
 | **P1** | Remove or justify `aggregateRating` in schema | Tiny |
 | **P2** | Privacy + Terms pages | Content |
-| **P2** | Mission Control “demo data” banner | Small |
+| **P2** | Mission Control “demo data” banner (done another way, readiness E5: the page shows no figures) | Small |
 | **P2** | Wire `send-invitation` webhook | Ops |
 | **P2** | Deploy `capture-loi-metadata` | Ops |
 | **P3** | Real case studies / insights (`docs/TEAM_TASKS.md`) | Ongoing |

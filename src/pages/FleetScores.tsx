@@ -583,7 +583,8 @@ const FleetScores = () => {
                       Band
                     </th>
                     <SortHeader label="Miles" sortKeyName="miles" className="text-right" />
-                    <SortHeader label="Gal. wasted" sortKeyName="gallons" className="text-right" />
+                    {/* The backend models this figure (modeled_gallons_wasted), so the label says so. */}
+                    <SortHeader label="Gal. wasted (modeled)" sortKeyName="gallons" className="text-right" />
                   </tr>
                 </thead>
                 <tbody>

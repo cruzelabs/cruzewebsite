@@ -56,6 +56,19 @@ The worker config tries to bind `og.cruzemaps.com`. To make that work:
 
 To use a different subdomain, edit `workers/og-image/wrangler.jsonc#routes`.
 
+### Rate limits
+
+A render costs about 90 ms of CPU, so renders are rate limited. `wrangler.jsonc` binds two native rate limiters (`ratelimits`):
+
+- `RL_PER_IP`: 10 renders a minute per client IP (`CF-Connecting-IP`). An IPv6 address counts by its /64, because a home or a phone usually gets a whole /64 and could use a new address for every request.
+- `RL_GLOBAL`: 60 renders a minute in total. It is asked only after the IP passes, so one IP cannot use it up.
+
+Cloudflare counts both per location. Past either one the worker answers 429 with `Retry-After: 60` and `cache-control: no-store`. A cached image never counts, so it is still served.
+
+Titles are capped at 140 characters and subtitles at 200. The cache key holds only the capped title, subtitle and kind, so extra query parameters or longer text get the cached image instead of a new render. Without the two bindings the worker renders nothing (it throws, and the watchdog reports it), but it still serves cached images.
+
+The logic is in `src/handler.ts` and its tests in `src/handler.test.ts`, which run in the root `npm test`.
+
 ### Wire it from React (optional, after the worker is live)
 
 In `src/lib/seo.ts`, you can swap any route's `ogImage` to point at the worker, e.g.:
@@ -63,6 +76,8 @@ In `src/lib/seo.ts`, you can swap any route's `ogImage` to point at the worker, 
 ```ts
 ogImage: "https://og.cruzemaps.com/?title=Cruze%20for%20Fleets&kind=fleet"
 ```
+
+Mind the rate limits above: a crawler that asks for more than 10 new cards a minute from one IP gets a 429 for the rest until it comes back. Cards that are already cached are always served.
 
 For per-case-study OG images, set `canonicalOverride` + `ogImage` in `CaseStudyDetail.tsx`'s `<SEO>` block.
 

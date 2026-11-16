@@ -14,22 +14,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // Configurable backend base. Defaults to the local Functions host in DEV only.
 // In a production build we refuse to silently fall back to localhost (that
-// would make every visitor's browser probe 127.0.0.1); with no
-// VITE_CRUZE_API_URL configured, the backend integration is disabled and a
-// clear warning is logged instead.
+// would make every visitor's browser probe 127.0.0.1). With no
+// VITE_CRUZE_API_URL configured, the backend integration is off: the hook
+// reports "unavailable", never fetches, and /fleet-scores says that driver
+// scores are not available instead of offering a login to a backend that is
+// not there. A warning for whoever runs the deploy goes to the console.
 export const CRUZE_API_URL: string =
   (import.meta.env.VITE_CRUZE_API_URL as string) ||
   (import.meta.env.PROD ? "" : "http://127.0.0.1:7071/api");
 
 if (!CRUZE_API_URL) {
   console.warn(
-    "[useFleetScores] VITE_CRUZE_API_URL is not set for this production build — " +
-      "the fleet-scores backend is disabled (not falling back to localhost)."
+    "[useFleetScores] VITE_CRUZE_API_URL is not set for this production build, so driver scores " +
+      "are off (no localhost fallback)."
   );
 }
-
-const BACKEND_DISABLED_MSG =
-  "The fleet backend is not configured for this deployment (VITE_CRUZE_API_URL is unset).";
 
 // Persist the backend token per-tab. sessionStorage (not localStorage) mirrors the
 // site's demo-bypass convention: per-tab, never shared across tabs.
@@ -84,6 +83,7 @@ interface FleetScoresResponse {
 }
 
 type FleetScoresStatus =
+  | "unavailable" // no backend configured for this build: nothing to fetch or sign in to
   | "exchanging" // bridging the Supabase session to a backend token via SSO
   | "needs_auth" // no token yet; show the connect-backend panel
   | "loading"
@@ -130,6 +130,7 @@ export function useFleetScores(
   const [data, setData] = useState<FleetScoresResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<FleetScoresStatus>(() => {
+    if (!CRUZE_API_URL) return "unavailable";
     if (readStoredToken()) return "loading";
     // A Supabase session is available: we'll attempt the SSO exchange first.
     return "needs_auth";
@@ -158,8 +159,7 @@ export function useFleetScores(
     // flight so its late response can't overwrite state back to "ready".
     const reqId = ++reqIdRef.current;
     if (!CRUZE_API_URL) {
-      setStatus("error");
-      setError(BACKEND_DISABLED_MSG);
+      setStatus("unavailable");
       return;
     }
     if (!token) {
@@ -244,8 +244,9 @@ export function useFleetScores(
   );
 
   useEffect(() => {
-    // Only attempt the exchange when we have a Supabase session, no backend token
-    // cached yet, and we haven't already tried for this exact Supabase token.
+    // Only attempt the exchange when there is a backend, a Supabase session, no
+    // backend token cached yet, and no earlier try for this exact Supabase token.
+    if (!CRUZE_API_URL) return;
     if (!supabaseAccessToken) return;
     if (token) return;
     if (exchangeAttemptedFor.current === supabaseAccessToken) return;
@@ -268,8 +269,7 @@ export function useFleetScores(
   const login = useCallback(
     async (username: string, password: string) => {
       if (!CRUZE_API_URL) {
-        setStatus("error");
-        setError(BACKEND_DISABLED_MSG);
+        setStatus("unavailable");
         return;
       }
       setError(null);
@@ -312,7 +312,7 @@ export function useFleetScores(
   const logout = useCallback(() => {
     persistToken(null);
     setData(null);
-    setStatus("needs_auth");
+    setStatus(CRUZE_API_URL ? "needs_auth" : "unavailable");
     setError(null);
   }, [persistToken]);
 

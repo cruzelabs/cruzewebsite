@@ -6,9 +6,10 @@
 //
 //   1. In a production build with no VITE_CRUZE_API_URL, the hook must NOT fall
 //      back to localhost (that would make every visitor's browser probe
-//      127.0.0.1). The backend integration disables itself with a console
-//      warning and a clear user-facing error instead. Test "production build
-//      with no backend URL" guards that regression directly.
+//      127.0.0.1). The backend integration turns itself off with a console
+//      warning and reports "unavailable", so /fleet-scores says that driver
+//      scores are not available (readiness E5). Test "production build with no
+//      backend URL" guards that regression directly.
 //   2. The SSO exchange runs at most once per Supabase access token: a 503
 //      (sso-not-configured) or 401 (JWT rejected) degrades quietly to the
 //      manual login / token-paste fallback rather than erroring or retry-looping
@@ -261,31 +262,56 @@ describe("useFleetScores: production build with no backend URL (security invaria
     vi.resetModules();
   });
 
-  it("disables the backend instead of falling back to localhost", async () => {
-    // CRUZE_API_URL is resolved at module load from import.meta.env, so stub the
-    // env and re-import to exercise the production-no-URL branch.
+  // CRUZE_API_URL is resolved at module load from import.meta.env, so stub the
+  // env and re-import to exercise the production-no-URL branch.
+  async function loadWithoutBackend() {
     vi.stubEnv("PROD", true);
     vi.stubEnv("VITE_CRUZE_API_URL", "");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.resetModules();
-
     const mod = await import("./useFleetScores");
+    return { mod, warn };
+  }
+
+  it("turns the backend off instead of falling back to localhost", async () => {
+    const { mod, warn } = await loadWithoutBackend();
     expect(mod.CRUZE_API_URL).toBe("");
-    // The module warns once at load time that the backend is disabled.
+    // The module warns once at load time, for whoever runs the deploy.
     expect(warn).toHaveBeenCalledTimes(1);
 
     const { result } = renderHook(() => mod.useFleetScores());
 
-    await waitFor(() => expect(result.current.status).toBe("error"));
-    expect(result.current.error).toMatch(/not configured for this deployment/i);
+    // Readiness E5: an honest "unavailable" state, with no error text that
+    // names config for the page to show.
+    expect(result.current.status).toBe("unavailable");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(result.current.status).toBe("unavailable");
+    expect(result.current.error).toBeNull();
     // Critically: no probe to 127.0.0.1 or anywhere else.
     expect(fetchMock).not.toHaveBeenCalled();
 
-    // A manual login must also refuse rather than hit localhost.
+    // A manual login, a pasted token and a logout must not reach anything either.
     await act(async () => {
       await result.current.login("manager", "pw");
     });
+    act(() => result.current.setToken("pasted"));
+    await new Promise((r) => setTimeout(r, 0));
+    act(() => result.current.logout());
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(result.current.status).toBe("error");
+    expect(result.current.status).toBe("unavailable");
+    expect(result.current.error).toBeNull();
+  });
+
+  it("does not try the SSO exchange or a stored token", async () => {
+    sessionStorage.setItem(TOKEN_KEY, "stale-token");
+    const { mod } = await loadWithoutBackend();
+
+    const { result } = renderHook(() =>
+      mod.useFleetScores(7, { supabaseAccessToken: "supabase-jwt" })
+    );
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(result.current.status).toBe("unavailable");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

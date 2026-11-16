@@ -292,10 +292,11 @@ export const ROUTES: RouteMeta[] = [
   },
   {
     // Protected fleet manager dashboard (driver safety/efficiency scores).
-    // noindex: behind auth, never crawlable.
+    // noindex: behind auth, never crawlable. The description makes no "live"
+    // claim: with no fleet backend configured the page shows no scores.
     path: "/fleet-scores",
     title: "Fleet Driver Scores | Cruze",
-    description: "Live driver safety and efficiency scores for your Cruze fleet.",
+    description: "Driver safety and efficiency scores for your Cruze fleet.",
     noindex: true,
   },
   {

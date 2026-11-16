@@ -77,6 +77,8 @@ In `src/lib/seo.ts`, you can swap any route's `ogImage` to point at the worker, 
 ogImage: "https://og.cruzemaps.com/?title=Cruze%20for%20Fleets&kind=fleet"
 ```
 
+Mind the rate limits above: a crawler that asks for more than 10 new cards a minute from one IP gets a 429 for the rest until it comes back. Cards that are already cached are always served.
+
 For per-case-study OG images, set `canonicalOverride` + `ogImage` in `CaseStudyDetail.tsx`'s `<SEO>` block.
 
 ## 3. Cloudflare Worker — frame analyzer (Claude vision)

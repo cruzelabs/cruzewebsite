@@ -5,7 +5,7 @@
 // the cache key, so extra parameters or long text cannot force new renders.
 // Runs in Node from the root Vitest suite; the renderer, cache and limiters
 // are fakes.
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
 import {
@@ -264,15 +264,32 @@ describe("the card text and the cache key", () => {
 });
 
 describe("wrangler.jsonc", () => {
-  const read = (worker: string) => {
-    const path = new URL(`../../${worker}/wrangler.jsonc`, import.meta.url);
+  type Limiter = { name: string; type?: string; namespace_id: string; simple: { limit: number; period: number } };
+  type Config = { ratelimits?: Limiter[]; unsafe?: { bindings?: Limiter[] } };
+
+  const WORKERS = new URL("../../", import.meta.url);
+  const OURS = new URL("og-image/wrangler.jsonc", WORKERS);
+  // Every Worker config in the repo: each folder in workers/ and the site's own.
+  const ALL = [
+    ...readdirSync(WORKERS, { withFileTypes: true })
+      .map((entry) => new URL(`${entry.name}/wrangler.jsonc`, WORKERS))
+      .filter((path) => existsSync(path)),
+    new URL("../wrangler.jsonc", WORKERS),
+  ];
+
+  const read = (path: URL): Config => {
     const { config, error } = ts.parseConfigFileTextToJson(path.pathname, readFileSync(path, "utf8"));
     expect(error).toBeUndefined();
     return config;
   };
+  // Both ways a rate limit can be bound: `ratelimits`, or the older unsafe binding.
+  const limiters = (config: Config) => [
+    ...(config.ratelimits ?? []),
+    ...(config.unsafe?.bindings ?? []).filter((b) => b.type === "ratelimit"),
+  ];
 
   it("binds both limiters with a 60-second period, matching Retry-After", () => {
-    const limits = read("og-image").ratelimits as { name: string; simple: { limit: number; period: number } }[];
+    const limits = read(OURS).ratelimits ?? [];
     expect(limits.map((l) => l.name).sort()).toEqual(["RL_GLOBAL", "RL_PER_IP"]);
     for (const l of limits) {
       expect(l.simple.period).toBe(RETRY_AFTER_SECONDS);
@@ -281,12 +298,14 @@ describe("wrangler.jsonc", () => {
   });
 
   it("uses namespace ids no other Worker in this repo uses", () => {
-    const ids = (config: { ratelimits?: { namespace_id: string }[]; unsafe?: { bindings?: { type: string; namespace_id: string }[] } }) => [
-      ...(config.ratelimits ?? []).map((b) => b.namespace_id),
-      ...(config.unsafe?.bindings ?? []).filter((b) => b.type === "ratelimit").map((b) => b.namespace_id),
-    ];
-    const ours = ids(read("og-image"));
-    const others = ids(read("frame-analyze"));
+    const ours = limiters(read(OURS)).map((l) => l.namespace_id);
+    const others = ALL.filter((path) => path.href !== OURS.href).flatMap((path) =>
+      limiters(read(path)).map((l) => l.namespace_id),
+    );
+    // The scan found the other configs (frame-analyze binds two limiters).
+    expect(ALL.some((path) => path.pathname.endsWith("/workers/frame-analyze/wrangler.jsonc"))).toBe(true);
+    expect(others.length).toBeGreaterThan(0);
+
     expect(ours).toHaveLength(2);
     expect(new Set(ours).size).toBe(2);
     expect(ours.filter((id) => others.includes(id))).toEqual([]);

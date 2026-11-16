@@ -96,16 +96,15 @@ If the URL 502s, the worker route binding didn't apply. Check `wrangler.jsonc` i
 
 ## Step 5b — (Alternative to 4 + 5a) Manual upload via dashboard
 
-Use this only if you can't run `wrangler` from a terminal. A Worker made this way has no rate limits (the `ratelimits` in `workers/og-image/wrangler.jsonc`), so it is only good for the placeholder below. Deploy the real worker with wrangler.
+Use this only if you can't run `wrangler` from a terminal. It gives you a placeholder, not the real worker: the dashboard editor bundles neither npm packages (`workers-og`) nor other files (`src/index.ts` imports `src/handler.ts`), and the real worker renders nothing without the two rate limits in `workers/og-image/wrangler.jsonc`. Deploy the real worker with wrangler as soon as you can.
 
 1. Navigate to: `https://dash.cloudflare.com/<ACCOUNT_ID>/workers-and-pages`
 2. Click **Create application** → **Create Worker**.
 3. Name: `cruze-og-image`. Click **Deploy**.
 4. After deploy, click **Edit code**.
-5. Open the repo file: [`workers/og-image/src/index.ts`](../workers/og-image/src/index.ts). Copy the entire contents and paste into the editor (replacing the default handler).
-6. ⚠️ The dashboard editor doesn't bundle npm packages. For `workers-og` to work via dashboard, you'd need to inline its bundle — easier path is the CLI approach above. If you must use dashboard, comment out the `import { ImageResponse }` line and return a placeholder `Response("OG worker placeholder", { status: 200 })` until you can run wrangler.
-7. Click **Save and Deploy**.
-8. Click **Triggers** tab → **Add Custom Domain** → enter `og.cruzemaps.com` → save.
+5. Replace the default handler with a placeholder: `export default { fetch: () => new Response("OG worker placeholder", { status: 200 }) };`
+6. Click **Save and Deploy**.
+7. Click **Triggers** tab → **Add Custom Domain** → enter `og.cruzemaps.com` → save.
 
 ---
 
